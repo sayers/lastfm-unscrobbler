@@ -1,5 +1,7 @@
 import * as puppeteer from "puppeteer";
 
+import { loadBanned } from "./banned";
+
 const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
 const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
 
@@ -16,6 +18,39 @@ const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
   
   await page.goto(`https://www.last.fm/user/${USERNAME}/library`);
   
-  await page.waitFor(4000);
+  await page.waitForTimeout(4000);
+  const bannedLookups = await loadBanned();
+
+  const scrobbles = await page.$$(".chartlist-row--with-artist ");
+  console.log(`Processing ${scrobbles.length} scrobbles`);  
+
+  for (const scrobbleContainer of scrobbles) {
+    const artist: any = await scrobbleContainer.$(".chartlist-artist a");
+    if (artist !== null) {
+      const artistName = (await (await artist.getProperty("innerHTML")).jsonValue()).trim();
+      const album: any = await scrobbleContainer.$(".chartlist-image a");
+      const albumName = (await (await album.getProperty("href")).jsonValue()).trim();
+
+
+      if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
+        console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
+        console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
+        await scrobbleContainer.hover();
+        await page.waitForTimeout(2000);
+        const artistMore = await scrobbleContainer.$(".chartlist-more button.chartlist-more-button");
+        if (artistMore) {
+          await artistMore.click();
+        }
+    
+        await page.waitForTimeout(4000);
+        const artistDelete = await scrobbleContainer.$('.chartlist-more [type="submit"].more-item--delete');
+        if (artistDelete) {
+          await artistDelete.click();
+          await page.waitForTimeout(1000);
+        }
+      }
+    }
+  }
+
   await browser.close();
 })();
