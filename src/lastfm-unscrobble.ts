@@ -6,18 +6,21 @@ const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
 const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
 
 (async () => {
-  const browser = await puppeteer.launch({headless: false});
+  const browser = await puppeteer.launch({headless: true});
   const page = await browser.newPage();
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/80.0.3987.0 Safari/537.36");
   await page.goto("https://www.last.fm/login");
-  
   await page.type("#id_username_or_email", USERNAME);
   await page.type("#id_password", PASSWORD);
-  await page.click('.form-submit [type="submit"]');
-  await page.waitForNavigation();
   
-  await page.goto(`https://www.last.fm/user/${USERNAME}/library`);
-  
+  await Promise.all([
+    page.click('.form-submit [type="submit"]'),
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+  ]);
+  console.log("Log in successful, going to library.");
+
+  await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
+
   await page.waitForTimeout(4000);
   const bannedLookups = await loadBanned();
 
