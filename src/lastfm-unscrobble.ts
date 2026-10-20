@@ -1,3 +1,4 @@
+import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
 import { loadBanned } from "./banned.ts";
@@ -5,9 +6,29 @@ import { loadBanned } from "./banned.ts";
 const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
 const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
 
-const browser = await chromium.launch({ headless: true });
+const { values } = parseArgs({
+  options: {
+    "dry-run": { type: "boolean" },
+    debug: { type: "boolean", default: false },
+  },
+  allowNegative: true,
+});
+const debug = values.debug;
+// Debug runs default to a dry run; pass --no-dry-run alongside --debug to really delete.
+const dryRun = values["dry-run"] ?? debug;
+if (dryRun) {
+  console.log("Dry run: unwanted scrobbles will be listed but not deleted.");
+}
+if (debug) {
+  console.log("Debug: showing the browser and slowing down each action.");
+}
+
+// In debug mode show the browser window and slow each action down so it can be followed by eye.
+const browser = await chromium.launch(debug ? { headless: false, slowMo: 250 } : { headless: true });
+// Present as regular desktop Chrome, matching the bundled browser's version so it never goes stale.
+const chromeMajor = browser.version().split(".")[0];
 const context = await browser.newContext({
-  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/80.0.3987.0 Safari/537.36",
+  userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`,
 });
 const page = await context.newPage();
 await page.goto("https://www.last.fm/login");
@@ -42,6 +63,9 @@ for (let i = count - 1; i >= 0; i--) {
     if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
       console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
       console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
+      if (dryRun) {
+        continue;
+      }
       await scrobbleContainer.hover();
       await scrobbleContainer.locator(".chartlist-more button.chartlist-more-button").click();
       await scrobbleContainer.locator('.chartlist-more [type="submit"].more-item--delete').click();

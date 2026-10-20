@@ -8,7 +8,9 @@
   },
   "scripts": {
     "typecheck": "tsc",
-    "start": "node --experimental-strip-types --env-file=.env src/lastfm-unscrobble.ts"
+    "start": "node --experimental-strip-types --env-file=.env src/lastfm-unscrobble.ts",
+    "start:dry-run": "npm start -- --dry-run",
+    "start:debug": "npm start -- --debug"
   },
   "author": "",
   "license": "ISC",
