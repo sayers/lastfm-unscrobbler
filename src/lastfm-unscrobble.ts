@@ -48,14 +48,38 @@ const context = await browser.newContext({
   userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`,
 });
 const page = await context.newPage();
-await page.goto("https://www.last.fm/login");
-await page.fill("#id_username_or_email", USERNAME);
-await page.fill("#id_password", PASSWORD);
 
-await Promise.all([
-  page.waitForURL((url) => !url.pathname.startsWith("/login")),
-  page.click('.form-submit [type="submit"]'),
-]);
+const logIn = async (): Promise<{ result: "loggedIn" | "rejected" } | { result: "failed"; reason: string }> => {
+  try {
+    await page.goto("https://www.last.fm/login");
+    await page.fill("#id_username_or_email", USERNAME);
+    await page.fill("#id_password", PASSWORD);
+
+    // After submitting, either we leave the login page or Last.fm shows its bad-credentials error.
+    // Each wait resolves to true/false rather than rejecting, so whichever loses the race can't crash the script later.
+    const loggedIn = page.waitForURL((url) => !url.pathname.startsWith("/login")).then(() => true, () => false);
+    const rejected = page.getByText("Please enter a correct username/email and password").waitFor().then(() => true, () => false);
+    await page.click('.form-submit [type="submit"]');
+    return await Promise.race([
+      loggedIn.then((ok) => (ok ? { result: "loggedIn" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
+      rejected.then((ok) => (ok ? { result: "rejected" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
+    ]);
+  } catch (error) {
+    // Playwright errors carry a multi-line call log; the first line says what went wrong.
+    return { result: "failed", reason: (error instanceof Error ? error.message : String(error)).split("\n")[0] };
+  }
+};
+
+const login = await logIn();
+if (login.result === "rejected") {
+  console.error(`Failed to log in: Last.fm rejected the credentials for "${USERNAME}". Check LASTFM_USERNAME and LASTFM_PASSWORD in .env; both may be case-sensitive.`);
+} else if (login.result === "failed") {
+  console.error(`Failed to log in to Last.fm (${login.reason}). Run with --debug to watch what the login page is doing.`);
+}
+if (login.result !== "loggedIn") {
+  await browser.close();
+  process.exit(1);
+}
 console.log("Log in successful, going to library.");
 
 await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
