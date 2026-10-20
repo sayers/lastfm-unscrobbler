@@ -13,10 +13,14 @@ if (!USERNAME || !PASSWORD) {
   problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
 }
 if (!existsSync(BANNED_ARTISTS_FILE)) {
-  problems.push(`No banned artist list found at ${resolve(BANNED_ARTISTS_FILE)}. Create it with one artist name per line.`);
+  problems.push(
+    `No banned artist list found at ${resolve(BANNED_ARTISTS_FILE)}. Create it with one artist name per line.`,
+  );
 }
 if (!existsSync(BANNED_ALBUMS_FILE)) {
-  problems.push(`No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`);
+  problems.push(
+    `No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`,
+  );
 }
 if (problems.length > 0 || !USERNAME || !PASSWORD) {
   console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
@@ -57,12 +61,31 @@ const logIn = async (): Promise<{ result: "loggedIn" | "rejected" } | { result: 
 
     // After submitting, either we leave the login page or Last.fm shows its bad-credentials error.
     // Each wait resolves to true/false rather than rejecting, so whichever loses the race can't crash the script later.
-    const loggedIn = page.waitForURL((url) => !url.pathname.startsWith("/login")).then(() => true, () => false);
-    const rejected = page.getByText("Please enter a correct username/email and password").waitFor().then(() => true, () => false);
+    const loggedIn = page
+      .waitForURL((url) => !url.pathname.startsWith("/login"))
+      .then(
+        () => true,
+        () => false,
+      );
+    const rejected = page
+      .getByText("Please enter a correct username/email and password")
+      .waitFor()
+      .then(
+        () => true,
+        () => false,
+      );
     await page.click('.form-submit [type="submit"]');
     return await Promise.race([
-      loggedIn.then((ok) => (ok ? { result: "loggedIn" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
-      rejected.then((ok) => (ok ? { result: "rejected" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
+      loggedIn.then((ok) =>
+        ok
+          ? ({ result: "loggedIn" } as const)
+          : ({ result: "failed", reason: "the login page never moved on" } as const),
+      ),
+      rejected.then((ok) =>
+        ok
+          ? ({ result: "rejected" } as const)
+          : ({ result: "failed", reason: "the login page never moved on" } as const),
+      ),
     ]);
   } catch (error) {
     // Playwright errors carry a multi-line call log; the first line says what went wrong.
@@ -72,9 +95,13 @@ const logIn = async (): Promise<{ result: "loggedIn" | "rejected" } | { result: 
 
 const login = await logIn();
 if (login.result === "rejected") {
-  console.error(`Failed to log in: Last.fm rejected the credentials for "${USERNAME}". Check LASTFM_USERNAME and LASTFM_PASSWORD in .env; both may be case-sensitive.`);
+  console.error(
+    `Failed to log in: Last.fm rejected the credentials for "${USERNAME}". Check LASTFM_USERNAME and LASTFM_PASSWORD in .env; both may be case-sensitive.`,
+  );
 } else if (login.result === "failed") {
-  console.error(`Failed to log in to Last.fm (${login.reason}). Run with --debug to watch what the login page is doing.`);
+  console.error(
+    `Failed to log in to Last.fm (${login.reason}). Run with --debug to watch what the login page is doing.`,
+  );
 }
 if (login.result !== "loggedIn") {
   await browser.close();
@@ -95,15 +122,21 @@ console.log(`Processing ${count} scrobbles`);
 for (let i = count - 1; i >= 0; i--) {
   const scrobbleContainer = rows.nth(i);
   const artist = scrobbleContainer.locator(".chartlist-artist a");
-  if (await artist.count() > 0) {
+  if ((await artist.count()) > 0) {
     const artistName = (await artist.first().innerHTML()).trim();
     // Read the resolved href property (absolute URL) rather than the raw attribute.
-    const albumName = (await scrobbleContainer.locator(".chartlist-image a").first()
-      .evaluate((a) => (a as HTMLAnchorElement).href)).trim();
+    const albumName = (
+      await scrobbleContainer
+        .locator(".chartlist-image a")
+        .first()
+        .evaluate((a) => (a as HTMLAnchorElement).href)
+    ).trim();
 
     if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
       console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
-      console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
+      console.log(
+        `Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `,
+      );
       if (dryRun) {
         continue;
       }
