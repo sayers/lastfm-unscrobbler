@@ -1,10 +1,27 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
-import { loadBanned } from "./banned.ts";
+import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
 
-const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
-const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
+const USERNAME = process.env.LASTFM_USERNAME;
+const PASSWORD = process.env.LASTFM_PASSWORD;
+
+const problems: string[] = [];
+if (!USERNAME || !PASSWORD) {
+  problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
+}
+if (!existsSync(BANNED_ARTISTS_FILE)) {
+  problems.push(`No banned artist list found at ${resolve(BANNED_ARTISTS_FILE)}. Create it with one artist name per line.`);
+}
+if (!existsSync(BANNED_ALBUMS_FILE)) {
+  problems.push(`No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`);
+}
+if (problems.length > 0 || !USERNAME || !PASSWORD) {
+  console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
+  process.exit(1);
+}
 
 const { values } = parseArgs({
   options: {
