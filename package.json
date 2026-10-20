@@ -2,17 +2,23 @@
   "name": "lastfm-unscrobbler",
   "version": "0.0.1",
   "description": "A simple tool that will remove unwanted scrobbles from your Last.fm account",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "scripts": {
-    "start": "tsc && node -r dotenv/config src/lastfm-unscrobble.js"
+    "typecheck": "tsc",
+    "start": "node --experimental-strip-types --env-file=.env src/lastfm-unscrobble.ts",
+    "start:dry-run": "npm start -- --dry-run",
+    "start:debug": "npm start -- --debug"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "dotenv": "^16.0.0",
-    "puppeteer": "^13.0.1"
+    "playwright": "^1.64.1"
   },
   "devDependencies": {
-    "typescript": "^4.5.4",
-    "@types/puppeteer": "^5.4.4"
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
   }
 }

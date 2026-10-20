@@ -1,14 +1,18 @@
 {
   "compilerOptions": {
-    "target": "esnext",
-    "module": "commonjs",
-    "lib": ["esnext", "dom"],
+    "target": "es2023",
+    "module": "nodenext",
+    "lib": ["es2023", "dom"],
+    "types": ["node"],
     "rootDir": "src",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": "."
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
   }
 }

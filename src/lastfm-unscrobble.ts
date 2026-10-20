@@ -1,59 +1,118 @@
-import * as puppeteer from "puppeteer";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { chromium } from "playwright";
 
-import { loadBanned } from "./banned";
+import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
 
-const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
-const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
+const USERNAME = process.env.LASTFM_USERNAME;
+const PASSWORD = process.env.LASTFM_PASSWORD;
 
-(async () => {
-  const browser = await puppeteer.launch({headless: true});
-  const page = await browser.newPage();
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/80.0.3987.0 Safari/537.36");
-  await page.goto("https://www.last.fm/login");
-  await page.type("#id_username_or_email", USERNAME);
-  await page.type("#id_password", PASSWORD);
-  
-  await Promise.all([
-    page.click('.form-submit [type="submit"]'),
-    page.waitForNavigation({ waitUntil: 'networkidle0' }),
-  ]);
-  console.log("Log in successful, going to library.");
+const problems: string[] = [];
+if (!USERNAME || !PASSWORD) {
+  problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
+}
+if (!existsSync(BANNED_ARTISTS_FILE)) {
+  problems.push(`No banned artist list found at ${resolve(BANNED_ARTISTS_FILE)}. Create it with one artist name per line.`);
+}
+if (!existsSync(BANNED_ALBUMS_FILE)) {
+  problems.push(`No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`);
+}
+if (problems.length > 0 || !USERNAME || !PASSWORD) {
+  console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
+  process.exit(1);
+}
 
-  await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
+const { values } = parseArgs({
+  options: {
+    "dry-run": { type: "boolean" },
+    debug: { type: "boolean", default: false },
+  },
+  allowNegative: true,
+});
+const debug = values.debug;
+// Debug runs default to a dry run; pass --no-dry-run alongside --debug to really delete.
+const dryRun = values["dry-run"] ?? debug;
+if (dryRun) {
+  console.log("Dry run: unwanted scrobbles will be listed but not deleted.");
+}
+if (debug) {
+  console.log("Debug: showing the browser and slowing down each action.");
+}
 
-  await page.waitForTimeout(4000);
-  const bannedLookups = await loadBanned();
+// In debug mode show the browser window and slow each action down so it can be followed by eye.
+const browser = await chromium.launch(debug ? { headless: false, slowMo: 250 } : { headless: true });
+// Present as regular desktop Chrome, matching the bundled browser's version so it never goes stale.
+const chromeMajor = browser.version().split(".")[0];
+const context = await browser.newContext({
+  userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`,
+});
+const page = await context.newPage();
 
-  const scrobbles = await page.$$(".chartlist-row--with-artist ");
-  console.log(`Processing ${scrobbles.length} scrobbles`);  
+const logIn = async (): Promise<{ result: "loggedIn" | "rejected" } | { result: "failed"; reason: string }> => {
+  try {
+    await page.goto("https://www.last.fm/login");
+    await page.fill("#id_username_or_email", USERNAME);
+    await page.fill("#id_password", PASSWORD);
 
-  for (const scrobbleContainer of scrobbles) {
-    const artist: any = await scrobbleContainer.$(".chartlist-artist a");
-    if (artist !== null) {
-      const artistName = (await (await artist.getProperty("innerHTML")).jsonValue()).trim();
-      const album: any = await scrobbleContainer.$(".chartlist-image a");
-      const albumName = (await (await album.getProperty("href")).jsonValue()).trim();
+    // After submitting, either we leave the login page or Last.fm shows its bad-credentials error.
+    // Each wait resolves to true/false rather than rejecting, so whichever loses the race can't crash the script later.
+    const loggedIn = page.waitForURL((url) => !url.pathname.startsWith("/login")).then(() => true, () => false);
+    const rejected = page.getByText("Please enter a correct username/email and password").waitFor().then(() => true, () => false);
+    await page.click('.form-submit [type="submit"]');
+    return await Promise.race([
+      loggedIn.then((ok) => (ok ? { result: "loggedIn" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
+      rejected.then((ok) => (ok ? { result: "rejected" } as const : { result: "failed", reason: "the login page never moved on" } as const)),
+    ]);
+  } catch (error) {
+    // Playwright errors carry a multi-line call log; the first line says what went wrong.
+    return { result: "failed", reason: (error instanceof Error ? error.message : String(error)).split("\n")[0] };
+  }
+};
 
+const login = await logIn();
+if (login.result === "rejected") {
+  console.error(`Failed to log in: Last.fm rejected the credentials for "${USERNAME}". Check LASTFM_USERNAME and LASTFM_PASSWORD in .env; both may be case-sensitive.`);
+} else if (login.result === "failed") {
+  console.error(`Failed to log in to Last.fm (${login.reason}). Run with --debug to watch what the login page is doing.`);
+}
+if (login.result !== "loggedIn") {
+  await browser.close();
+  process.exit(1);
+}
+console.log("Log in successful, going to library.");
 
-      if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
-        console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
-        console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
-        await scrobbleContainer.hover();
-        await page.waitForTimeout(2000);
-        const artistMore = await scrobbleContainer.$(".chartlist-more button.chartlist-more-button");
-        if (artistMore) {
-          await artistMore.click();
-        }
-    
-        await page.waitForTimeout(4000);
-        const artistDelete = await scrobbleContainer.$('.chartlist-more [type="submit"].more-item--delete');
-        if (artistDelete) {
-          await artistDelete.click();
-          await page.waitForTimeout(1000);
-        }
+await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
+
+const rows = page.locator(".chartlist-row--with-artist");
+await rows.first().waitFor();
+const bannedLookups = await loadBanned();
+
+const count = await rows.count();
+console.log(`Processing ${count} scrobbles`);
+
+// Walk the rows bottom-up so deleting one doesn't shift the indexes of those still to be checked.
+for (let i = count - 1; i >= 0; i--) {
+  const scrobbleContainer = rows.nth(i);
+  const artist = scrobbleContainer.locator(".chartlist-artist a");
+  if (await artist.count() > 0) {
+    const artistName = (await artist.first().innerHTML()).trim();
+    // Read the resolved href property (absolute URL) rather than the raw attribute.
+    const albumName = (await scrobbleContainer.locator(".chartlist-image a").first()
+      .evaluate((a) => (a as HTMLAnchorElement).href)).trim();
+
+    if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
+      console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
+      console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
+      if (dryRun) {
+        continue;
       }
+      await scrobbleContainer.hover();
+      await scrobbleContainer.locator(".chartlist-more button.chartlist-more-button").click();
+      await scrobbleContainer.locator('.chartlist-more [type="submit"].more-item--delete').click();
+      await page.waitForTimeout(1000);
     }
   }
+}
 
-  await browser.close();
-})();
+await browser.close();
