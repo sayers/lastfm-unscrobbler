@@ -2,6 +2,7 @@
   "name": "lastfm-unscrobbler",
   "version": "0.0.1",
   "description": "A simple tool that will remove unwanted scrobbles from your Last.fm account",
+  "type": "module",
   "engines": {
     "node": ">=22.6.0"
   },
