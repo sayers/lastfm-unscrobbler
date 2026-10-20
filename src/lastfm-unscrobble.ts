@@ -1,6 +1,6 @@
 import { chromium } from "playwright";
 
-import { loadBanned } from "./banned";
+import { loadBanned } from "./banned.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
 const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
