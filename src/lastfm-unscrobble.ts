@@ -1,4 +1,4 @@
-import * as puppeteer from "puppeteer";
+import { chromium } from "playwright";
 
 import { loadBanned } from "./banned";
 
@@ -6,51 +6,47 @@ const USERNAME = process.env.LASTFM_USERNAME || "Username missing";
 const PASSWORD = process.env.LASTFM_PASSWORD || "Password missing";
 
 (async () => {
-  const browser = await puppeteer.launch({headless: true});
-  const page = await browser.newPage();
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/80.0.3987.0 Safari/537.36");
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/80.0.3987.0 Safari/537.36",
+  });
+  const page = await context.newPage();
   await page.goto("https://www.last.fm/login");
-  await page.type("#id_username_or_email", USERNAME);
-  await page.type("#id_password", PASSWORD);
-  
+  await page.fill("#id_username_or_email", USERNAME);
+  await page.fill("#id_password", PASSWORD);
+
   await Promise.all([
+    page.waitForURL((url) => !url.pathname.startsWith("/login")),
     page.click('.form-submit [type="submit"]'),
-    page.waitForNavigation({ waitUntil: 'networkidle0' }),
   ]);
   console.log("Log in successful, going to library.");
 
   await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
 
-  await page.waitForTimeout(4000);
+  const rows = page.locator(".chartlist-row--with-artist");
+  await rows.first().waitFor();
   const bannedLookups = await loadBanned();
 
-  const scrobbles = await page.$$(".chartlist-row--with-artist ");
-  console.log(`Processing ${scrobbles.length} scrobbles`);  
+  const count = await rows.count();
+  console.log(`Processing ${count} scrobbles`);
 
-  for (const scrobbleContainer of scrobbles) {
-    const artist: any = await scrobbleContainer.$(".chartlist-artist a");
-    if (artist !== null) {
-      const artistName = (await (await artist.getProperty("innerHTML")).jsonValue()).trim();
-      const album: any = await scrobbleContainer.$(".chartlist-image a");
-      const albumName = (await (await album.getProperty("href")).jsonValue()).trim();
-
+  // Walk the rows bottom-up so deleting one doesn't shift the indexes of those still to be checked.
+  for (let i = count - 1; i >= 0; i--) {
+    const scrobbleContainer = rows.nth(i);
+    const artist = scrobbleContainer.locator(".chartlist-artist a");
+    if (await artist.count() > 0) {
+      const artistName = (await artist.first().innerHTML()).trim();
+      // Read the resolved href property (absolute URL) rather than the raw attribute.
+      const albumName = (await scrobbleContainer.locator(".chartlist-image a").first()
+        .evaluate((a) => (a as HTMLAnchorElement).href)).trim();
 
       if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
         console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
         console.log(`Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `);
         await scrobbleContainer.hover();
-        await page.waitForTimeout(2000);
-        const artistMore = await scrobbleContainer.$(".chartlist-more button.chartlist-more-button");
-        if (artistMore) {
-          await artistMore.click();
-        }
-    
-        await page.waitForTimeout(4000);
-        const artistDelete = await scrobbleContainer.$('.chartlist-more [type="submit"].more-item--delete');
-        if (artistDelete) {
-          await artistDelete.click();
-          await page.waitForTimeout(1000);
-        }
+        await scrobbleContainer.locator(".chartlist-more button.chartlist-more-button").click();
+        await scrobbleContainer.locator('.chartlist-more [type="submit"].more-item--delete').click();
+        await page.waitForTimeout(1000);
       }
     }
   }

@@ -3,12 +3,12 @@
     "target": "esnext",
     "module": "commonjs",
     "lib": ["esnext", "dom"],
+    "types": ["node"],
     "rootDir": "src",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
-    "noFallthroughCasesInSwitch": true,
-    "baseUrl": "."
+    "noFallthroughCasesInSwitch": true
   }
 }

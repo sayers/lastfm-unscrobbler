@@ -3,16 +3,17 @@
   "version": "0.0.1",
   "description": "A simple tool that will remove unwanted scrobbles from your Last.fm account",
   "scripts": {
+    "build": "tsc",
     "start": "tsc && node -r dotenv/config src/lastfm-unscrobble.js"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.0.0",
-    "puppeteer": "^13.0.1"
+    "playwright": "^1.64.1"
   },
   "devDependencies": {
-    "typescript": "^4.5.4",
-    "@types/puppeteer": "^5.4.4"
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
   }
 }
