@@ -49,6 +49,7 @@ Your lists live in the `data/` folder, which is kept out of source control. Each
 | `data/allow.list.txt` | Artists that are yours. They are never suggested for banning. |
 | `data/last-seen.json` | Written by the tool: the newest scrobble left after the last completed real run |
 | `data/suggestions.txt` | Written by the tool: the suggestions from the latest dry run |
+| `data/deleted.log` | Written by the tool: one line for every scrobble a real run deleted, skipped or failed to delete |
 
 Both banned lists are required. The allow list is optional, but the tool warns when it is missing, as suggestions are noisier without it. Artist names must match Last.fm exactly.
 
@@ -64,6 +65,12 @@ A run deletes the scrobbles that match a banned artist or album. A dry run only 
 Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES`, if any artist in the scanned pages is on neither list, or if any unwanted scrobble was not deleted.
 
 Before deleting a scrobble, a real run checks that its row still shows the same artist, track and time, and skips it if not. A deletion only counts once Last.fm has removed the row; if that doesn't happen within 10 seconds it counts as failed. The run ends with how many scrobbles were deleted, skipped and failed.
+
+Last.fm has no undo, so every attempt is appended to `data/deleted.log` as it happens: when, the outcome, the artist and track, when it was scrobbled, the album, and whether the artist or album matched, plus the reason for a failure. For example:
+
+```
+2026-10-21T04:30:12.000Z  deleted  Peppa Pig - Theme  scrobbled 2026-10-21T03:20:00.000Z  music/Peppa+Pig/Album  matched artist
+```
 
 Every artist must end up on the banned or allow list. An artist on neither list, whose scrobbles are not all being deleted anyway, is an unknown artist. Any run with unknown artists ends with a warning naming them, and real runs hold back `data/last-seen.json` until each one has been added to a list.
 

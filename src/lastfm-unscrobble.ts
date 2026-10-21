@@ -13,6 +13,7 @@ import {
   loadBanned,
   readList,
 } from "./banned.ts";
+import { appendToDeletedLog, DELETED_LOG_FILE } from "./deleted-log.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { deleteScrobble, readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
@@ -256,6 +257,10 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
     }
     const outcome = await deleteScrobble(scrobble);
     deleteCounts[outcome.result]++;
+    const matched = [bannedLookups.artists.has(artist) && "artist", bannedLookups.albums.has(album) && "album"]
+      .filter(Boolean)
+      .join(" and ");
+    await appendToDeletedLog({ scrobble, outcome, matched });
     if (outcome.result === "skipped") {
       console.warn(`Skipped ${artist} - ${track}: its row no longer shows that scrobble, so it was left alone.`);
     } else if (outcome.result === "failed") {
@@ -269,6 +274,9 @@ if (!dryRun) {
   console.log(
     `Deleted ${deleteCounts.deleted} scrobbles, skipped ${deleteCounts.skipped}, failed ${deleteCounts.failed}.`,
   );
+  if (deleteCounts.deleted + deleteCounts.skipped + deleteCounts.failed > 0) {
+    console.log(`Each attempt is recorded in ${resolve(DELETED_LOG_FILE)}`);
+  }
 }
 
 // Every artist left after the deletions must be on the banned or allow list.
