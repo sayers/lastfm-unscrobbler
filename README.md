@@ -49,8 +49,11 @@ Your lists live in the `data/` folder, which is kept out of source control. Each
 | `data/allow.list.txt` | Artists that are yours. They are never suggested for banning. |
 | `data/last-seen.json` | Written by the tool: the newest scrobble left after the last completed real run |
 | `data/suggestions.txt` | Written by the tool: the suggestions from the latest dry run |
+| `data/deleted.log` | Written by the tool: one line for every scrobble a real run deleted, skipped or failed to delete |
 
-Both banned lists are required. The allow list is optional, but the tool warns when it is missing, as suggestions are noisier without it. Artist names must match Last.fm exactly. Delete `data/last-seen.json` to make the next run start from `DEFAULT_PAGES` again.
+Both banned lists are required. The allow list is optional, but the tool warns when it is missing, as suggestions are noisier without it. Artist names must match Last.fm exactly.
+
+The lists are checked before logging in. An artist on both the banned and allow lists stops the run, so you can decide which list it belongs on. An entry listed twice in the same list only gets a warning. Delete `data/last-seen.json` to make the next run start from `DEFAULT_PAGES` again.
 
 ## How a run works
 A run deletes the scrobbles that match a banned artist or album. A dry run only lists them. Both scan the same pages:
@@ -59,21 +62,29 @@ A run deletes the scrobbles that match a banned artist or album. A dry run only 
 2. While the oldest page read still has a scrobble to delete, read one more page.
 3. Stop at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
 
-Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES` or if any artist in the scanned pages is on neither list.
+Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES`, if any artist in the scanned pages is on neither list, or if any unwanted scrobble was not deleted.
+
+Before deleting a scrobble, a real run checks that its row still shows the same artist, track and time, and skips it if not. A deletion only counts once Last.fm has answered the delete request with a success and marked the row as deleted (it stays on the page, greyed out). An error answer, or no answer or mark within 10 seconds, counts as failed. The run ends with how many scrobbles were deleted, skipped and failed.
+
+Last.fm has no undo, so every attempt is appended to `data/deleted.log` as it happens: when, the outcome, the artist and track, when it was scrobbled, the album, and whether the artist or album matched, plus the reason for a failure. For example:
+
+```
+2026-10-21T04:30:12.000Z  deleted  Peppa Pig - Theme  scrobbled 2026-10-21T03:20:00.000Z  music/Peppa+Pig/Album  matched artist
+```
 
 Every artist must end up on the banned or allow list. An artist on neither list, whose scrobbles are not all being deleted anyway, is an unknown artist. Any run with unknown artists ends with a warning naming them, and real runs hold back `data/last-seen.json` until each one has been added to a list.
 
 A dry run never deletes anything and never updates `data/last-seen.json`.
 
 ## Suggestions
-A dry run groups the scanned scrobbles into listening sessions, split wherever there is a gap longer than `SESSION_GAP_MINUTES`. A session counts as banned when at least half of its scrobbles would be deleted.
+A dry run judges each play by the scrobbles around it. It looks at up to 3 known scrobbles on each side: banned ones (scrobbles that would be deleted) and your own (allow-listed artists). Unknown artists next to it are skipped, so unknown artists played together can't vouch for each other. The search stops at a gap longer than `SESSION_GAP_MINUTES`, so a long break keeps one listener's music from judging another's. A play with more banned neighbours is next to banned scrobbles, one with more of your own is next to your own, and a tie or no known neighbours is unclear.
 
-From those sessions it suggests:
+From those judgements it suggests:
 
-- **Artists to ban**: unknown artists with more than half of their plays in banned sessions.
-- **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and only ever in banned sessions. These are Various Artists compilations and albums by artists on your allow list.
-- **Artists to allow**: unknown artists with no plays in banned sessions.
-- **Artists to decide**: unknown artists with some plays in banned sessions, but no more than half.
+- **Artists to ban**: unknown artists with more than half of their plays next to banned scrobbles.
+- **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and every time next to banned scrobbles. These are Various Artists compilations and albums by artists on your allow list.
+- **Artists to allow**: unknown artists played next to your own music and never next to banned scrobbles.
+- **Artists to decide**: every other unknown artist, with mixed neighbours or none clear enough to guess from.
 
 Every unknown artist appears in exactly one of the three artist sections, even after a single play, so none can be missed. The play counts in each reason show how strong the guess is, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. Once an artist is on either list, it is no longer suggested.
 

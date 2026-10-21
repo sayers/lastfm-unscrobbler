@@ -3,11 +3,23 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
-import { ALLOWED_ARTISTS_FILE, BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadAllowed, loadBanned } from "./banned.ts";
+import {
+  ALLOWED_ARTISTS_FILE,
+  BANNED_ALBUMS_FILE,
+  BANNED_ARTISTS_FILE,
+  findConflicts,
+  findDuplicates,
+  loadAllowed,
+  loadBanned,
+  readList,
+} from "./banned.ts";
+import { appendToDeletedLog, DELETED_LOG_FILE } from "./deleted-log.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
-import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
+import { deleteScrobble, readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
   findUnknownArtists,
+  type Judgement,
+  judgePlays,
   printSuggestions,
   SUGGESTIONS_FILE,
   suggestAlbumsToBan,
@@ -66,6 +78,23 @@ if (!existsSync(ALLOWED_ARTISTS_FILE)) {
   console.warn(
     `Warning: no allow list found at ${resolve(ALLOWED_ARTISTS_FILE)}. It would be wise to create it with one artist name per line for the artists that are yours, so they are never suggested for banning.`,
   );
+}
+
+// Check the lists before logging in, so mistakes in them are caught straight away.
+for (const file of [BANNED_ARTISTS_FILE, BANNED_ALBUMS_FILE, ALLOWED_ARTISTS_FILE].filter((file) => existsSync(file))) {
+  const duplicates = findDuplicates(await readList(file));
+  if (duplicates.length > 0) {
+    console.warn(`Warning: ${resolve(file)} lists these more than once: ${duplicates.join(", ")}`);
+  }
+}
+const bannedLookups = await loadBanned();
+const allowedArtists = await loadAllowed();
+const conflicts = findConflicts(bannedLookups.artists, allowedArtists);
+if (conflicts.length > 0) {
+  console.error(
+    `Cannot start: these artists are on both ${resolve(BANNED_ARTISTS_FILE)} and ${resolve(ALLOWED_ARTISTS_FILE)}. Remove each one from the list it doesn't belong on:\n${conflicts.map((artist) => `  - ${artist}`).join("\n")}`,
+  );
+  process.exit(1);
 }
 
 const { values } = parseArgs({
@@ -150,10 +179,8 @@ if (login.result !== "loggedIn") {
 }
 console.log("Log in successful, going to library.");
 
-const bannedLookups = await loadBanned();
 const isUnwanted = (scrobble: Scrobble) =>
   bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
-const allowedArtists = await loadAllowed();
 
 const lastPage = await readLastPageNumber(page, USERNAME);
 const pageLimit = Math.min(MAX_PAGES, lastPage);
@@ -213,6 +240,7 @@ while (
 console.log(`Scanning ${pageCount} pages`);
 
 const scanned: Scrobble[] = [];
+const deleteCounts = { deleted: 0, skipped: 0, failed: 0 };
 // Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
 for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
@@ -222,16 +250,34 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const unwanted = scrobbles.filter(isUnwanted);
 
   // Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
-  for (const { artist, album, row } of unwanted.toReversed()) {
+  for (const scrobble of unwanted.toReversed()) {
+    const { artist, track, album } = scrobble;
     console.log(`Unwanted scrobble: ${artist} - ${album} `);
     console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
     if (dryRun) {
       continue;
     }
-    await row.hover();
-    await row.locator(".chartlist-more button.chartlist-more-button").click();
-    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+    const outcome = await deleteScrobble(scrobble);
+    deleteCounts[outcome.result]++;
+    const matched = [bannedLookups.artists.has(artist) && "artist", bannedLookups.albums.has(album) && "album"]
+      .filter(Boolean)
+      .join(" and ");
+    await appendToDeletedLog({ scrobble, outcome, matched });
+    if (outcome.result === "skipped") {
+      console.warn(`Skipped ${artist} - ${track}: its row no longer shows that scrobble, so it was left alone.`);
+    } else if (outcome.result === "failed") {
+      console.warn(`Failed to delete ${artist} - ${track}: ${outcome.reason}`);
+    }
+    // A short pause between deletions so Last.fm isn't hit too quickly.
     await page.waitForTimeout(1000);
+  }
+}
+if (!dryRun) {
+  console.log(
+    `Deleted ${deleteCounts.deleted} scrobbles, skipped ${deleteCounts.skipped}, failed ${deleteCounts.failed}.`,
+  );
+  if (deleteCounts.deleted + deleteCounts.skipped + deleteCounts.failed > 0) {
+    console.log(`Each attempt is recorded in ${resolve(DELETED_LOG_FILE)}`);
   }
 }
 
@@ -244,27 +290,31 @@ const unknownArtists = findUnknownArtists(
 const isUnknown = (artist: string) => unknownArtists.has(artist);
 
 if (dryRun) {
-  const sessions = toSessions(scanned, SESSION_GAP_MINUTES, isUnwanted);
+  const plays = judgePlays(toSessions(scanned, SESSION_GAP_MINUTES), isUnwanted, (artist) =>
+    allowedArtists.has(artist),
+  );
+  const unknownPlays = plays.filter(({ scrobble }) => isUnknown(scrobble.artist));
+  const judged = (judgement: Judgement) => unknownPlays.filter((play) => play.judgement === judgement).length;
   console.log(
-    `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
+    `Judged ${unknownPlays.length} plays by unknown artists by their nearby scrobbles: ${judged("near banned")} next to banned scrobbles, ${judged("near own")} next to your own, ${judged("unclear")} unclear.`,
   );
   const sections = [
-    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isUnknown) },
+    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(plays, isUnknown) },
     {
       title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
       suggestions: suggestAlbumsToBan(
-        sessions,
+        plays,
         (artist) => allowedArtists.has(artist),
         (album) => bannedLookups.albums.has(album),
       ),
     },
     {
       title: `Artists to allow (add to ${ALLOWED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToAllow(sessions, isUnknown),
+      suggestions: suggestArtistsToAllow(plays, isUnknown),
     },
     {
       title: `Artists to decide (add to ${BANNED_ARTISTS_FILE} or ${ALLOWED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToDecide(sessions, isUnknown),
+      suggestions: suggestArtistsToDecide(plays, isUnknown),
     },
   ];
   printSuggestions(sections);
@@ -287,6 +337,8 @@ if (dryRun) {
   console.warn("The last-seen scrobble was not updated because the run stopped at MAX_PAGES.");
 } else if (unknownArtists.size > 0) {
   console.warn("The last-seen scrobble was not updated because some artists are on neither list.");
+} else if (deleteCounts.skipped + deleteCounts.failed > 0) {
+  console.warn("The last-seen scrobble was not updated because some unwanted scrobbles were not deleted.");
 } else {
   const [newest] = await readLibraryPage(page, USERNAME, 1);
   if (newest) {

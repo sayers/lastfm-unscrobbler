@@ -36,6 +36,27 @@ export const readLastPageNumber = async (page: Page, username: string) => {
   return Number(((await pages.last().textContent()) ?? "").trim());
 };
 
+// A row's scrobble, or undefined for a row without an artist link.
+const readRow = async (row: Locator): Promise<Scrobble | undefined> => {
+  const artist = row.locator(".chartlist-artist a");
+  if ((await artist.count()) === 0) {
+    return undefined;
+  }
+  return {
+    artist: ((await artist.first().textContent()) ?? "").trim(),
+    track: ((await row.locator(".chartlist-name a").first().textContent()) ?? "").trim(),
+    // Read the resolved href property (absolute URL) rather than the raw attribute.
+    album: (
+      await row
+        .locator(".chartlist-image a")
+        .first()
+        .evaluate((a) => (a as HTMLAnchorElement).href)
+    ).trim(),
+    timestamp: parseTimestamp((await row.locator(".chartlist-timestamp span").first().getAttribute("title")) ?? ""),
+    row,
+  };
+};
+
 export const readLibraryPage = async (page: Page, username: string, pageNumber: number): Promise<Scrobble[]> => {
   await page.goto(`https://www.last.fm/user/${username}/library?page=${pageNumber}`);
 
@@ -45,24 +66,68 @@ export const readLibraryPage = async (page: Page, username: string, pageNumber: 
   const scrobbles: Scrobble[] = [];
   const count = await rows.count();
   for (let i = 0; i < count; i++) {
-    const row = rows.nth(i);
-    const artist = row.locator(".chartlist-artist a");
-    if ((await artist.count()) === 0) {
-      continue;
+    const scrobble = await readRow(rows.nth(i));
+    if (scrobble) {
+      scrobbles.push(scrobble);
     }
-    scrobbles.push({
-      artist: ((await artist.first().textContent()) ?? "").trim(),
-      track: ((await row.locator(".chartlist-name a").first().textContent()) ?? "").trim(),
-      // Read the resolved href property (absolute URL) rather than the raw attribute.
-      album: (
-        await row
-          .locator(".chartlist-image a")
-          .first()
-          .evaluate((a) => (a as HTMLAnchorElement).href)
-      ).trim(),
-      timestamp: parseTimestamp((await row.locator(".chartlist-timestamp span").first().getAttribute("title")) ?? ""),
-      row,
-    });
   }
   return scrobbles;
+};
+
+export type DeleteOutcome = { result: "deleted" } | { result: "skipped" } | { result: "failed"; reason: string };
+
+// How long Last.fm gets to answer a delete request, and then to mark the row as deleted.
+const DELETE_TIMEOUT_MS = 10_000;
+
+// Last.fm keeps a deleted row on the page, greyed out, and marks it with this attribute.
+const isMarkedDeleted = (row: Element) => row.getAttribute("data-ajax-form-state") === "deleted";
+
+// Deletes a scrobble, but only if its row still shows the scrobble it was read as,
+// so a page that has shifted since it was read can't lose the wrong one.
+// Counts as deleted only once Last.fm has answered the delete request with a success
+// and marked the row as deleted.
+export const deleteScrobble = async ({ artist, track, timestamp, row }: Scrobble): Promise<DeleteOutcome> => {
+  try {
+    const current = (await row.count()) === 1 ? await readRow(row) : undefined;
+    if (
+      current?.artist !== artist ||
+      current.track !== track ||
+      current.timestamp.getTime() !== timestamp.getTime() ||
+      (await row.evaluate(isMarkedDeleted))
+    ) {
+      return { result: "skipped" };
+    }
+    const deleteButton = row.locator('.chartlist-more [type="submit"].more-item--delete');
+    // The delete button's form says where the request goes.
+    const action = await deleteButton.evaluate((button) => (button as HTMLButtonElement).form?.action ?? "");
+    if (!action) {
+      return { result: "failed", reason: "could not find where the delete button sends its request" };
+    }
+    await row.hover();
+    await row.locator(".chartlist-more button.chartlist-more-button").click();
+    // Listen for the answer while clicking, so it can't arrive before anything is waiting for it.
+    const [answer] = await Promise.all([
+      row.page().waitForResponse((r) => r.request().method() === "POST" && r.url().startsWith(action), {
+        timeout: DELETE_TIMEOUT_MS,
+      }),
+      deleteButton.click(),
+    ]);
+    if (!answer.ok()) {
+      return { result: "failed", reason: `Last.fm answered the delete request with ${answer.status()}` };
+    }
+    const marked = await row
+      .page()
+      .waitForFunction(isMarkedDeleted, await row.elementHandle(), { timeout: DELETE_TIMEOUT_MS })
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!marked) {
+      return { result: "failed", reason: "Last.fm answered the delete request but didn't mark the row as deleted" };
+    }
+    return { result: "deleted" };
+  } catch (error) {
+    // Playwright errors carry a multi-line call log; the first line says what went wrong.
+    return { result: "failed", reason: (error instanceof Error ? error.message : String(error)).split("\n")[0] };
+  }
 };
