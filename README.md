@@ -36,6 +36,7 @@ Settings live in `.env`:
 | `LASTFM_USERNAME` | Your Last.fm username (required) |
 | `LASTFM_PASSWORD` | Your Last.fm password (required) |
 | `DEFAULT_PAGES` | How many library pages to scan (default `10`) |
+| `MAX_PAGES` | The most library pages a single run will scan (default `50`) |
 
 ## Data files
 Your lists live in the `data/` folder, which is kept out of source control. Each list has one entry per line.
@@ -49,6 +50,8 @@ Both files are required. Artist names must match Last.fm exactly.
 
 ## How a run works
 A run checks the newest `DEFAULT_PAGES` pages of your library and deletes the scrobbles that match a banned artist or album. A dry run only lists them.
+
+While the oldest page checked still has a scrobble to delete, the run checks one more page. It stops at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
 
 Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked.
 

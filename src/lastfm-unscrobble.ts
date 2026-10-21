@@ -4,11 +4,12 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
 import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
-import { readLastPageNumber, readLibraryPage } from "./library.ts";
+import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
 const PASSWORD = process.env.LASTFM_PASSWORD;
 const DEFAULT_PAGES = Number(process.env.DEFAULT_PAGES || 10);
+const MAX_PAGES = Number(process.env.MAX_PAGES || 50);
 
 const problems: string[] = [];
 if (!USERNAME || !PASSWORD) {
@@ -16,6 +17,10 @@ if (!USERNAME || !PASSWORD) {
 }
 if (!Number.isInteger(DEFAULT_PAGES) || DEFAULT_PAGES < 1) {
   problems.push(`DEFAULT_PAGES in .env must be a whole number of at least 1, not "${process.env.DEFAULT_PAGES}".`);
+} else if (!Number.isInteger(MAX_PAGES) || MAX_PAGES < DEFAULT_PAGES) {
+  problems.push(
+    `MAX_PAGES in .env must be a whole number no smaller than DEFAULT_PAGES (${DEFAULT_PAGES}), not "${process.env.MAX_PAGES ?? MAX_PAGES}".`,
+  );
 }
 if (!existsSync(BANNED_ARTISTS_FILE)) {
   problems.push(
@@ -115,17 +120,34 @@ if (login.result !== "loggedIn") {
 console.log("Log in successful, going to library.");
 
 const bannedLookups = await loadBanned();
-const pageCount = Math.min(DEFAULT_PAGES, await readLastPageNumber(page, USERNAME));
+const isUnwanted = (scrobble: Scrobble) =>
+  bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
+
+const lastPage = await readLastPageNumber(page, USERNAME);
+let pageCount = Math.min(DEFAULT_PAGES, lastPage);
+let reachedMaxPages = false;
+// Unwanted scrobbles on the oldest page scanned may carry on beyond it, so keep going back until a page has none.
+while (pageCount < lastPage && (await readLibraryPage(page, USERNAME, pageCount)).some(isUnwanted)) {
+  if (pageCount === MAX_PAGES) {
+    reachedMaxPages = true;
+    break;
+  }
+  console.log(`Page ${pageCount} has unwanted scrobbles, so page ${pageCount + 1} will be scanned too.`);
+  pageCount++;
+}
 console.log(`Scanning ${pageCount} pages`);
+if (reachedMaxPages) {
+  console.warn(
+    `Warning: stopped at MAX_PAGES (${MAX_PAGES}) but page ${MAX_PAGES} still has unwanted scrobbles, so there may be more further back.`,
+  );
+}
 
 // Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
 for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
   console.log(`Page ${pageNumber}: processing ${scrobbles.length} scrobbles`);
 
-  const unwanted = scrobbles.filter(
-    (scrobble) => bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album),
-  );
+  const unwanted = scrobbles.filter(isUnwanted);
 
   // Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
   for (const { artist, album, row } of unwanted.toReversed()) {
