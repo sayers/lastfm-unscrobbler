@@ -37,8 +37,8 @@ export const toSessions = (
   return groups.map((group) => ({ scrobbles: group, banned: group.filter(isUnwanted).length * 2 >= group.length }));
 };
 
-// Artists on neither list who turn up mostly in banned sessions.
-export const suggestArtistsToBan = (sessions: Session[], isListed: (artist: string) => boolean): Suggestion[] => {
+// Each artist's plays, and how many of them were in banned sessions.
+const countArtistPlays = (sessions: Session[]) => {
   const plays = new Map<string, { total: number; inBanned: number }>();
   for (const { scrobbles, banned } of sessions) {
     for (const { artist } of scrobbles) {
@@ -50,14 +50,25 @@ export const suggestArtistsToBan = (sessions: Session[], isListed: (artist: stri
       plays.set(artist, counts);
     }
   }
-  return [...plays]
+  return [...plays];
+};
+
+// Artists on neither list who turn up mostly in banned sessions.
+export const suggestArtistsToBan = (sessions: Session[], isListed: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(sessions)
     .filter(([artist, { total, inBanned }]) => !isListed(artist) && total >= MIN_PLAYS && inBanned * 2 > total)
     .sort(([, a], [, b]) => b.inBanned - a.inBanned || a.total - b.total)
     .map(([artist, { total, inBanned }]) => ({
       name: artist,
       reason: `${inBanned} of ${total} plays in banned sessions`,
     }));
-};
+
+// Artists on neither list who never turn up in a banned session, so are most likely yours.
+export const suggestArtistsToAllow = (sessions: Session[], isListed: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(sessions)
+    .filter(([artist, { total, inBanned }]) => !isListed(artist) && total >= MIN_PLAYS && inBanned === 0)
+    .sort(([artistA, a], [artistB, b]) => b.total - a.total || artistA.localeCompare(artistB))
+    .map(([artist, { total }]) => ({ name: artist, reason: `${total} plays, none in banned sessions` }));
 
 // Albums that only turn up in banned sessions but can't be banned by artist:
 // compilations, whose tracks are by many artists, and albums by allow-listed artists.

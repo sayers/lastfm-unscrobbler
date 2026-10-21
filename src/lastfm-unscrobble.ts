@@ -10,6 +10,7 @@ import {
   printSuggestions,
   SUGGESTIONS_FILE,
   suggestAlbumsToBan,
+  suggestArtistsToAllow,
   suggestArtistsToBan,
   toSessions,
   writeSuggestions,
@@ -237,14 +238,9 @@ if (dryRun) {
   console.log(
     `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
   );
+  const isListed = (artist: string) => bannedLookups.artists.has(artist) || allowedArtists.has(artist);
   const sections = [
-    {
-      title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToBan(
-        sessions,
-        (artist) => bannedLookups.artists.has(artist) || allowedArtists.has(artist),
-      ),
-    },
+    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isListed) },
     {
       title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
       suggestions: suggestAlbumsToBan(
@@ -252,6 +248,10 @@ if (dryRun) {
         (artist) => allowedArtists.has(artist),
         (album) => bannedLookups.albums.has(album),
       ),
+    },
+    {
+      title: `Artists to allow (add to ${ALLOWED_ARTISTS_FILE})`,
+      suggestions: suggestArtistsToAllow(sessions, isListed),
     },
   ];
   printSuggestions(sections);

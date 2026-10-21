@@ -70,8 +70,9 @@ From those sessions it suggests:
 
 - **Artists to ban**: artists in neither list who appear at least 3 times, mostly in banned sessions.
 - **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and only ever in banned sessions. These are Various Artists compilations and albums by artists on your allow list.
+- **Artists to allow**: artists in neither list who appear at least 3 times and never in a banned session.
 
-Each suggestion comes with its reason, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching banned list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. To stop an artist being suggested, add them to `data/allow.list.txt`.
+Each suggestion comes with its reason, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. To stop an artist being suggested, add them to `data/allow.list.txt`.
 
 ## Development
 ```bash

@@ -3,7 +3,14 @@ import { describe, it } from "node:test";
 import type { Locator } from "playwright";
 
 import type { Scrobble } from "./library.ts";
-import { formatSuggestions, type Session, suggestAlbumsToBan, suggestArtistsToBan, toSessions } from "./suggestions.ts";
+import {
+  formatSuggestions,
+  type Session,
+  suggestAlbumsToBan,
+  suggestArtistsToAllow,
+  suggestArtistsToBan,
+  toSessions,
+} from "./suggestions.ts";
 
 const bannedArtists = new Set(["Peppa Pig", "Bluey"]);
 const isUnwanted = (scrobble: Scrobble) => bannedArtists.has(scrobble.artist);
@@ -184,6 +191,50 @@ describe("suggestAlbumsToBan", () => {
     assert.deepEqual(
       suggestAlbumsToBan(sessions, isAllowed, notBanned).map(({ name }) => name),
       [SHREK, GIRL, CINDERELLA],
+    );
+  });
+});
+
+describe("suggestArtistsToAllow", () => {
+  const notListed = () => false;
+
+  it("suggests an artist with at least 3 plays, none in banned sessions", () => {
+    const sessions = [session(false, "Massive Attack", "Massive Attack"), session(false, "Massive Attack")];
+    assert.deepEqual(suggestArtistsToAllow(sessions, notListed), [
+      { name: "Massive Attack", reason: "3 plays, none in banned sessions" },
+    ]);
+  });
+
+  it("needs at least 3 plays", () => {
+    const sessions = [session(false, "Massive Attack", "Massive Attack")];
+    assert.deepEqual(suggestArtistsToAllow(sessions, notListed), []);
+  });
+
+  it("rules out an artist with any play in a banned session", () => {
+    const sessions = [
+      session(false, "Massive Attack", "Massive Attack", "Massive Attack"),
+      session(true, "Peppa Pig", "Massive Attack"),
+    ];
+    assert.deepEqual(suggestArtistsToAllow(sessions, notListed), []);
+  });
+
+  it("skips artists already on a list", () => {
+    const sessions = [session(false, "Massive Attack", "Massive Attack", "Massive Attack")];
+    assert.deepEqual(
+      suggestArtistsToAllow(sessions, (artist) => artist === "Massive Attack"),
+      [],
+    );
+  });
+
+  it("puts the most played first, then sorts by name", () => {
+    const sessions = [
+      session(false, "UNKLE", "UNKLE", "UNKLE"),
+      session(false, "Zero 7", "Zero 7", "Zero 7", "Zero 7"),
+      session(false, "Archive", "Archive", "Archive"),
+    ];
+    assert.deepEqual(
+      suggestArtistsToAllow(sessions, notListed).map(({ name }) => name),
+      ["Zero 7", "Archive", "UNKLE"],
     );
   });
 });
