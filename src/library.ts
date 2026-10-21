@@ -36,6 +36,27 @@ export const readLastPageNumber = async (page: Page, username: string) => {
   return Number(((await pages.last().textContent()) ?? "").trim());
 };
 
+// A row's scrobble, or undefined for a row without an artist link.
+const readRow = async (row: Locator): Promise<Scrobble | undefined> => {
+  const artist = row.locator(".chartlist-artist a");
+  if ((await artist.count()) === 0) {
+    return undefined;
+  }
+  return {
+    artist: ((await artist.first().textContent()) ?? "").trim(),
+    track: ((await row.locator(".chartlist-name a").first().textContent()) ?? "").trim(),
+    // Read the resolved href property (absolute URL) rather than the raw attribute.
+    album: (
+      await row
+        .locator(".chartlist-image a")
+        .first()
+        .evaluate((a) => (a as HTMLAnchorElement).href)
+    ).trim(),
+    timestamp: parseTimestamp((await row.locator(".chartlist-timestamp span").first().getAttribute("title")) ?? ""),
+    row,
+  };
+};
+
 export const readLibraryPage = async (page: Page, username: string, pageNumber: number): Promise<Scrobble[]> => {
   await page.goto(`https://www.last.fm/user/${username}/library?page=${pageNumber}`);
 
@@ -45,24 +66,37 @@ export const readLibraryPage = async (page: Page, username: string, pageNumber: 
   const scrobbles: Scrobble[] = [];
   const count = await rows.count();
   for (let i = 0; i < count; i++) {
-    const row = rows.nth(i);
-    const artist = row.locator(".chartlist-artist a");
-    if ((await artist.count()) === 0) {
-      continue;
+    const scrobble = await readRow(rows.nth(i));
+    if (scrobble) {
+      scrobbles.push(scrobble);
     }
-    scrobbles.push({
-      artist: ((await artist.first().textContent()) ?? "").trim(),
-      track: ((await row.locator(".chartlist-name a").first().textContent()) ?? "").trim(),
-      // Read the resolved href property (absolute URL) rather than the raw attribute.
-      album: (
-        await row
-          .locator(".chartlist-image a")
-          .first()
-          .evaluate((a) => (a as HTMLAnchorElement).href)
-      ).trim(),
-      timestamp: parseTimestamp((await row.locator(".chartlist-timestamp span").first().getAttribute("title")) ?? ""),
-      row,
-    });
   }
   return scrobbles;
+};
+
+export type DeleteOutcome = { result: "deleted" } | { result: "skipped" } | { result: "failed"; reason: string };
+
+// How long Last.fm gets to remove a row after its delete button is clicked.
+const DELETE_TIMEOUT_MS = 10_000;
+
+// Deletes a scrobble, but only if its row still shows the scrobble it was read as,
+// so a page that has shifted since it was read can't lose the wrong one.
+// Counts as deleted only once Last.fm has removed the row.
+export const deleteScrobble = async ({ artist, track, timestamp, row }: Scrobble): Promise<DeleteOutcome> => {
+  try {
+    const current = (await row.count()) === 1 ? await readRow(row) : undefined;
+    if (current?.artist !== artist || current.track !== track || current.timestamp.getTime() !== timestamp.getTime()) {
+      return { result: "skipped" };
+    }
+    // Hold on to this exact element: the row locator moves on to the next row once this one goes.
+    const element = await row.elementHandle();
+    await row.hover();
+    await row.locator(".chartlist-more button.chartlist-more-button").click();
+    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+    await element.waitForElementState("hidden", { timeout: DELETE_TIMEOUT_MS });
+    return { result: "deleted" };
+  } catch (error) {
+    // Playwright errors carry a multi-line call log; the first line says what went wrong.
+    return { result: "failed", reason: (error instanceof Error ? error.message : String(error)).split("\n")[0] };
+  }
 };

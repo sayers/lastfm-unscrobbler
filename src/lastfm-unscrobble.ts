@@ -14,7 +14,7 @@ import {
   readList,
 } from "./banned.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
-import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
+import { deleteScrobble, readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
   findUnknownArtists,
   printSuggestions,
@@ -237,6 +237,7 @@ while (
 console.log(`Scanning ${pageCount} pages`);
 
 const scanned: Scrobble[] = [];
+const deleteCounts = { deleted: 0, skipped: 0, failed: 0 };
 // Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
 for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
@@ -246,17 +247,28 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const unwanted = scrobbles.filter(isUnwanted);
 
   // Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
-  for (const { artist, album, row } of unwanted.toReversed()) {
+  for (const scrobble of unwanted.toReversed()) {
+    const { artist, track, album } = scrobble;
     console.log(`Unwanted scrobble: ${artist} - ${album} `);
     console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
     if (dryRun) {
       continue;
     }
-    await row.hover();
-    await row.locator(".chartlist-more button.chartlist-more-button").click();
-    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+    const outcome = await deleteScrobble(scrobble);
+    deleteCounts[outcome.result]++;
+    if (outcome.result === "skipped") {
+      console.warn(`Skipped ${artist} - ${track}: its row no longer shows that scrobble, so it was left alone.`);
+    } else if (outcome.result === "failed") {
+      console.warn(`Failed to delete ${artist} - ${track}: ${outcome.reason}`);
+    }
+    // A short pause between deletions so Last.fm isn't hit too quickly.
     await page.waitForTimeout(1000);
   }
+}
+if (!dryRun) {
+  console.log(
+    `Deleted ${deleteCounts.deleted} scrobbles, skipped ${deleteCounts.skipped}, failed ${deleteCounts.failed}.`,
+  );
 }
 
 // Every artist left after the deletions must be on the banned or allow list.
@@ -311,6 +323,8 @@ if (dryRun) {
   console.warn("The last-seen scrobble was not updated because the run stopped at MAX_PAGES.");
 } else if (unknownArtists.size > 0) {
   console.warn("The last-seen scrobble was not updated because some artists are on neither list.");
+} else if (deleteCounts.skipped + deleteCounts.failed > 0) {
+  console.warn("The last-seen scrobble was not updated because some unwanted scrobbles were not deleted.");
 } else {
   const [newest] = await readLibraryPage(page, USERNAME, 1);
   if (newest) {

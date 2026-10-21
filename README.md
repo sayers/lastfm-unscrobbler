@@ -61,7 +61,9 @@ A run deletes the scrobbles that match a banned artist or album. A dry run only 
 2. While the oldest page read still has a scrobble to delete, read one more page.
 3. Stop at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
 
-Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES` or if any artist in the scanned pages is on neither list.
+Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES`, if any artist in the scanned pages is on neither list, or if any unwanted scrobble was not deleted.
+
+Before deleting a scrobble, a real run checks that its row still shows the same artist, track and time, and skips it if not. A deletion only counts once Last.fm has removed the row; if that doesn't happen within 10 seconds it counts as failed. The run ends with how many scrobbles were deleted, skipped and failed.
 
 Every artist must end up on the banned or allow list. An artist on neither list, whose scrobbles are not all being deleted anyway, is an unknown artist. Any run with unknown artists ends with a warning naming them, and real runs hold back `data/last-seen.json` until each one has been added to a list.
 
