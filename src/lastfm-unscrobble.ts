@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
 import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
+import { readLibraryPage } from "./library.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
 const PASSWORD = process.env.LASTFM_PASSWORD;
@@ -109,43 +110,25 @@ if (login.result !== "loggedIn") {
 }
 console.log("Log in successful, going to library.");
 
-await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
-
-const rows = page.locator(".chartlist-row--with-artist");
-await rows.first().waitFor();
 const bannedLookups = await loadBanned();
+const scrobbles = await readLibraryPage(page, USERNAME, 1);
+console.log(`Processing ${scrobbles.length} scrobbles`);
 
-const count = await rows.count();
-console.log(`Processing ${count} scrobbles`);
+const unwanted = scrobbles.filter(
+  (scrobble) => bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album),
+);
 
-// Walk the rows bottom-up so deleting one doesn't shift the indexes of those still to be checked.
-for (let i = count - 1; i >= 0; i--) {
-  const scrobbleContainer = rows.nth(i);
-  const artist = scrobbleContainer.locator(".chartlist-artist a");
-  if ((await artist.count()) > 0) {
-    const artistName = (await artist.first().innerHTML()).trim();
-    // Read the resolved href property (absolute URL) rather than the raw attribute.
-    const albumName = (
-      await scrobbleContainer
-        .locator(".chartlist-image a")
-        .first()
-        .evaluate((a) => (a as HTMLAnchorElement).href)
-    ).trim();
-
-    if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
-      console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
-      console.log(
-        `Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `,
-      );
-      if (dryRun) {
-        continue;
-      }
-      await scrobbleContainer.hover();
-      await scrobbleContainer.locator(".chartlist-more button.chartlist-more-button").click();
-      await scrobbleContainer.locator('.chartlist-more [type="submit"].more-item--delete').click();
-      await page.waitForTimeout(1000);
-    }
+// Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
+for (const { artist, album, row } of unwanted.toReversed()) {
+  console.log(`Unwanted scrobble: ${artist} - ${album} `);
+  console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
+  if (dryRun) {
+    continue;
   }
+  await row.hover();
+  await row.locator(".chartlist-more button.chartlist-more-button").click();
+  await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+  await page.waitForTimeout(1000);
 }
 
 await browser.close();
