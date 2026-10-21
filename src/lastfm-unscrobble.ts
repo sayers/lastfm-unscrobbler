@@ -3,14 +3,22 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
-import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
+import { ALLOWED_ARTISTS_FILE, BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadAllowed, loadBanned } from "./banned.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
+import {
+  printSuggestions,
+  SUGGESTIONS_FILE,
+  suggestArtistsToBan,
+  toSessions,
+  writeSuggestions,
+} from "./suggestions.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
 const PASSWORD = process.env.LASTFM_PASSWORD;
 const DEFAULT_PAGES = Number(process.env.DEFAULT_PAGES || 10);
 const MAX_PAGES = Number(process.env.MAX_PAGES || 50);
+const SESSION_GAP_MINUTES = Number(process.env.SESSION_GAP_MINUTES || 30);
 
 const problems: string[] = [];
 if (!USERNAME || !PASSWORD) {
@@ -21,6 +29,11 @@ if (!Number.isInteger(DEFAULT_PAGES) || DEFAULT_PAGES < 1) {
 } else if (!Number.isInteger(MAX_PAGES) || MAX_PAGES < DEFAULT_PAGES) {
   problems.push(
     `MAX_PAGES in .env must be a whole number no smaller than DEFAULT_PAGES (${DEFAULT_PAGES}), not "${process.env.MAX_PAGES ?? MAX_PAGES}".`,
+  );
+}
+if (!(SESSION_GAP_MINUTES > 0)) {
+  problems.push(
+    `SESSION_GAP_MINUTES in .env must be a number of minutes above 0, not "${process.env.SESSION_GAP_MINUTES}".`,
   );
 }
 if (!existsSync(BANNED_ARTISTS_FILE)) {
@@ -44,6 +57,11 @@ try {
 if (problems.length > 0 || !USERNAME || !PASSWORD) {
   console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
   process.exit(1);
+}
+if (!existsSync(ALLOWED_ARTISTS_FILE)) {
+  console.warn(
+    `Warning: no allow list found at ${resolve(ALLOWED_ARTISTS_FILE)}. It would be wise to create it with one artist name per line for the artists that are yours, so they are never suggested for banning.`,
+  );
 }
 
 const { values } = parseArgs({
@@ -131,6 +149,7 @@ console.log("Log in successful, going to library.");
 const bannedLookups = await loadBanned();
 const isUnwanted = (scrobble: Scrobble) =>
   bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
+const allowedArtists = await loadAllowed();
 
 const lastPage = await readLastPageNumber(page, USERNAME);
 const pageLimit = Math.min(MAX_PAGES, lastPage);
@@ -189,10 +208,12 @@ while (
 }
 console.log(`Scanning ${pageCount} pages`);
 
+const scanned: Scrobble[] = [];
 // Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
 for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
   console.log(`Page ${pageNumber}: processing ${scrobbles.length} scrobbles`);
+  scanned.push(...scrobbles);
 
   const unwanted = scrobbles.filter(isUnwanted);
 
@@ -208,6 +229,25 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
     await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
     await page.waitForTimeout(1000);
   }
+}
+
+if (dryRun) {
+  const sessions = toSessions(scanned, SESSION_GAP_MINUTES, isUnwanted);
+  console.log(
+    `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
+  );
+  const sections = [
+    {
+      title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`,
+      suggestions: suggestArtistsToBan(
+        sessions,
+        (artist) => bannedLookups.artists.has(artist) || allowedArtists.has(artist),
+      ),
+    },
+  ];
+  printSuggestions(sections);
+  await writeSuggestions(sections);
+  console.log(`Suggestions written to ${resolve(SUGGESTIONS_FILE)}`);
 }
 
 // Only a completed real run moves the starting point on; otherwise the next run covers the same ground again.

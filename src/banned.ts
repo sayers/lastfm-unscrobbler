@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 export const BANNED_ARTISTS_FILE = "./data/banned.list.txt";
 export const BANNED_ALBUMS_FILE = "./data/banned.album.list.txt";
+export const ALLOWED_ARTISTS_FILE = "./data/allow.list.txt";
 
 const readList = async (file: string) =>
   (await readFile(file, "utf-8")).split(/\r?\n/).filter((line) => line.trim() !== "");
@@ -25,4 +27,11 @@ export const loadBanned = async () => {
     artists: bannedArtistLookup,
     albums: bannedAlbumsLookup,
   };
+};
+
+// The allow list is optional; without it every artist not yet banned is a candidate for suggestions.
+export const loadAllowed = async () => {
+  const allowedArtistLookup = new Set(existsSync(ALLOWED_ARTISTS_FILE) ? await readList(ALLOWED_ARTISTS_FILE) : []);
+  console.log(`Allowed artists loaded: ${allowedArtistLookup.size}`);
+  return allowedArtistLookup;
 };
