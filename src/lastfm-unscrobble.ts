@@ -3,14 +3,42 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
-import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
+import { ALLOWED_ARTISTS_FILE, BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadAllowed, loadBanned } from "./banned.ts";
+import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
+import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
+import {
+  findUnknownArtists,
+  printSuggestions,
+  SUGGESTIONS_FILE,
+  suggestAlbumsToBan,
+  suggestArtistsToAllow,
+  suggestArtistsToBan,
+  suggestArtistsToDecide,
+  toSessions,
+  writeSuggestions,
+} from "./suggestions.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
 const PASSWORD = process.env.LASTFM_PASSWORD;
+const DEFAULT_PAGES = Number(process.env.DEFAULT_PAGES || 10);
+const MAX_PAGES = Number(process.env.MAX_PAGES || 50);
+const SESSION_GAP_MINUTES = Number(process.env.SESSION_GAP_MINUTES || 30);
 
 const problems: string[] = [];
 if (!USERNAME || !PASSWORD) {
   problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
+}
+if (!Number.isInteger(DEFAULT_PAGES) || DEFAULT_PAGES < 1) {
+  problems.push(`DEFAULT_PAGES in .env must be a whole number of at least 1, not "${process.env.DEFAULT_PAGES}".`);
+} else if (!Number.isInteger(MAX_PAGES) || MAX_PAGES < DEFAULT_PAGES) {
+  problems.push(
+    `MAX_PAGES in .env must be a whole number no smaller than DEFAULT_PAGES (${DEFAULT_PAGES}), not "${process.env.MAX_PAGES ?? MAX_PAGES}".`,
+  );
+}
+if (!(SESSION_GAP_MINUTES > 0)) {
+  problems.push(
+    `SESSION_GAP_MINUTES in .env must be a number of minutes above 0, not "${process.env.SESSION_GAP_MINUTES}".`,
+  );
 }
 if (!existsSync(BANNED_ARTISTS_FILE)) {
   problems.push(
@@ -22,9 +50,22 @@ if (!existsSync(BANNED_ALBUMS_FILE)) {
     `No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`,
   );
 }
+let lastSeen: LastSeen | undefined;
+try {
+  lastSeen = await readLastSeen();
+} catch (error) {
+  problems.push(
+    `Could not read ${resolve(LAST_SEEN_FILE)} (${error instanceof Error ? error.message : String(error)}). Fix or delete it; without it the run scans DEFAULT_PAGES pages.`,
+  );
+}
 if (problems.length > 0 || !USERNAME || !PASSWORD) {
   console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
   process.exit(1);
+}
+if (!existsSync(ALLOWED_ARTISTS_FILE)) {
+  console.warn(
+    `Warning: no allow list found at ${resolve(ALLOWED_ARTISTS_FILE)}. It would be wise to create it with one artist name per line for the artists that are yours, so they are never suggested for banning.`,
+  );
 }
 
 const { values } = parseArgs({
@@ -109,42 +150,150 @@ if (login.result !== "loggedIn") {
 }
 console.log("Log in successful, going to library.");
 
-await page.goto(`https://www.last.fm/user/${USERNAME}/library?page=1`);
-
-const rows = page.locator(".chartlist-row--with-artist");
-await rows.first().waitFor();
 const bannedLookups = await loadBanned();
+const isUnwanted = (scrobble: Scrobble) =>
+  bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
+const allowedArtists = await loadAllowed();
 
-const count = await rows.count();
-console.log(`Processing ${count} scrobbles`);
+const lastPage = await readLastPageNumber(page, USERNAME);
+const pageLimit = Math.min(MAX_PAGES, lastPage);
 
-// Walk the rows bottom-up so deleting one doesn't shift the indexes of those still to be checked.
-for (let i = count - 1; i >= 0; i--) {
-  const scrobbleContainer = rows.nth(i);
-  const artist = scrobbleContainer.locator(".chartlist-artist a");
-  if ((await artist.count()) > 0) {
-    const artistName = (await artist.first().innerHTML()).trim();
-    // Read the resolved href property (absolute URL) rather than the raw attribute.
-    const albumName = (
-      await scrobbleContainer
-        .locator(".chartlist-image a")
-        .first()
-        .evaluate((a) => (a as HTMLAnchorElement).href)
-    ).trim();
-
-    if (bannedLookups.artists.has(artistName) || bannedLookups.albums.has(albumName)) {
-      console.log(`Unwanted scrobble: ${artistName} - ${albumName} `);
-      console.log(
-        `Matched on Name: ${bannedLookups.artists.has(artistName)} Album: ${bannedLookups.albums.has(albumName)} `,
-      );
-      if (dryRun) {
-        continue;
-      }
-      await scrobbleContainer.hover();
-      await scrobbleContainer.locator(".chartlist-more button.chartlist-more-button").click();
-      await scrobbleContainer.locator('.chartlist-more [type="submit"].more-item--delete').click();
-      await page.waitForTimeout(1000);
+// The first page whose oldest scrobble is older than the previous real run's newest one.
+const findLastSeenPage = async ({ timestamp }: LastSeen) => {
+  for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber++) {
+    const oldest = (await readLibraryPage(page, USERNAME, pageNumber)).at(-1);
+    if (oldest && oldest.timestamp < timestamp) {
+      return pageNumber;
     }
+  }
+  return undefined;
+};
+
+let pageCount: number;
+let reachedMaxPages = false;
+if (lastSeen === undefined) {
+  console.log(`No record of a previous real run, so starting with ${DEFAULT_PAGES} pages.`);
+  pageCount = Math.min(DEFAULT_PAGES, lastPage);
+} else {
+  console.log(
+    `Looking for the previous real run's newest scrobble: ${lastSeen.artist} - ${lastSeen.track} at ${lastSeen.timestamp.toLocaleString()}`,
+  );
+  const lastSeenPage = await findLastSeenPage(lastSeen);
+  if (lastSeenPage === undefined) {
+    pageCount = pageLimit;
+    reachedMaxPages = pageLimit < lastPage;
+    if (reachedMaxPages) {
+      console.warn(
+        `Warning: stopped at MAX_PAGES (${MAX_PAGES}) before reaching the previous real run's newest scrobble, so there may be more to delete further back.`,
+      );
+    }
+  } else {
+    // Go 2 pages past it, in case anything around it was missed.
+    pageCount = Math.min(lastSeenPage + 2, pageLimit);
+    console.log(`Found it on page ${lastSeenPage}, so starting with ${pageCount} pages.`);
+  }
+}
+
+// Unwanted scrobbles on the oldest page scanned may carry on beyond it, so keep going back until a page has none.
+while (
+  !reachedMaxPages &&
+  pageCount < lastPage &&
+  (await readLibraryPage(page, USERNAME, pageCount)).some(isUnwanted)
+) {
+  if (pageCount === MAX_PAGES) {
+    reachedMaxPages = true;
+    console.warn(
+      `Warning: stopped at MAX_PAGES (${MAX_PAGES}) but page ${MAX_PAGES} still has unwanted scrobbles, so there may be more further back.`,
+    );
+    break;
+  }
+  console.log(`Page ${pageCount} has unwanted scrobbles, so page ${pageCount + 1} will be scanned too.`);
+  pageCount++;
+}
+console.log(`Scanning ${pageCount} pages`);
+
+const scanned: Scrobble[] = [];
+// Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
+for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
+  const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
+  console.log(`Page ${pageNumber}: processing ${scrobbles.length} scrobbles`);
+  scanned.push(...scrobbles);
+
+  const unwanted = scrobbles.filter(isUnwanted);
+
+  // Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
+  for (const { artist, album, row } of unwanted.toReversed()) {
+    console.log(`Unwanted scrobble: ${artist} - ${album} `);
+    console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
+    if (dryRun) {
+      continue;
+    }
+    await row.hover();
+    await row.locator(".chartlist-more button.chartlist-more-button").click();
+    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+    await page.waitForTimeout(1000);
+  }
+}
+
+// Every artist left after the deletions must be on the banned or allow list.
+const unknownArtists = findUnknownArtists(
+  scanned,
+  (artist) => bannedLookups.artists.has(artist) || allowedArtists.has(artist),
+  isUnwanted,
+);
+const isUnknown = (artist: string) => unknownArtists.has(artist);
+
+if (dryRun) {
+  const sessions = toSessions(scanned, SESSION_GAP_MINUTES, isUnwanted);
+  console.log(
+    `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
+  );
+  const sections = [
+    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isUnknown) },
+    {
+      title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
+      suggestions: suggestAlbumsToBan(
+        sessions,
+        (artist) => allowedArtists.has(artist),
+        (album) => bannedLookups.albums.has(album),
+      ),
+    },
+    {
+      title: `Artists to allow (add to ${ALLOWED_ARTISTS_FILE})`,
+      suggestions: suggestArtistsToAllow(sessions, isUnknown),
+    },
+    {
+      title: `Artists to decide (add to ${BANNED_ARTISTS_FILE} or ${ALLOWED_ARTISTS_FILE})`,
+      suggestions: suggestArtistsToDecide(sessions, isUnknown),
+    },
+  ];
+  printSuggestions(sections);
+  await writeSuggestions(sections);
+  console.log(`Suggestions written to ${resolve(SUGGESTIONS_FILE)}`);
+}
+
+if (unknownArtists.size > 0) {
+  const names = [...unknownArtists];
+  console.warn(
+    `Warning: ${names.length} artists are on neither the banned nor the allow list: ${names.slice(0, 10).join(", ")}${names.length > 10 ? ", ..." : ""}. Run a dry run for suggestions and add each one to a list.`,
+  );
+}
+
+// Only a completed real run with every artist decided moves the starting point on;
+// otherwise the next run covers the same ground again.
+if (dryRun) {
+  console.log("Dry run, so the last-seen scrobble was not updated.");
+} else if (reachedMaxPages) {
+  console.warn("The last-seen scrobble was not updated because the run stopped at MAX_PAGES.");
+} else if (unknownArtists.size > 0) {
+  console.warn("The last-seen scrobble was not updated because some artists are on neither list.");
+} else {
+  const [newest] = await readLibraryPage(page, USERNAME, 1);
+  if (newest) {
+    await writeLastSeen(newest);
+    console.log(
+      `Recorded the newest scrobble for next time: ${newest.artist} - ${newest.track} at ${newest.timestamp.toLocaleString()}`,
+    );
   }
 }
 
