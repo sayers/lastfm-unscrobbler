@@ -76,24 +76,55 @@ export const readLibraryPage = async (page: Page, username: string, pageNumber: 
 
 export type DeleteOutcome = { result: "deleted" } | { result: "skipped" } | { result: "failed"; reason: string };
 
-// How long Last.fm gets to remove a row after its delete button is clicked.
+// How long Last.fm gets to answer a delete request, and then to mark the row as deleted.
 const DELETE_TIMEOUT_MS = 10_000;
+
+// Last.fm keeps a deleted row on the page, greyed out, and marks it with this attribute.
+const isMarkedDeleted = (row: Element) => row.getAttribute("data-ajax-form-state") === "deleted";
 
 // Deletes a scrobble, but only if its row still shows the scrobble it was read as,
 // so a page that has shifted since it was read can't lose the wrong one.
-// Counts as deleted only once Last.fm has removed the row.
+// Counts as deleted only once Last.fm has answered the delete request with a success
+// and marked the row as deleted.
 export const deleteScrobble = async ({ artist, track, timestamp, row }: Scrobble): Promise<DeleteOutcome> => {
   try {
     const current = (await row.count()) === 1 ? await readRow(row) : undefined;
-    if (current?.artist !== artist || current.track !== track || current.timestamp.getTime() !== timestamp.getTime()) {
+    if (
+      current?.artist !== artist ||
+      current.track !== track ||
+      current.timestamp.getTime() !== timestamp.getTime() ||
+      (await row.evaluate(isMarkedDeleted))
+    ) {
       return { result: "skipped" };
     }
-    // Hold on to this exact element: the row locator moves on to the next row once this one goes.
-    const element = await row.elementHandle();
+    const deleteButton = row.locator('.chartlist-more [type="submit"].more-item--delete');
+    // The delete button's form says where the request goes.
+    const action = await deleteButton.evaluate((button) => (button as HTMLButtonElement).form?.action ?? "");
+    if (!action) {
+      return { result: "failed", reason: "could not find where the delete button sends its request" };
+    }
     await row.hover();
     await row.locator(".chartlist-more button.chartlist-more-button").click();
-    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
-    await element.waitForElementState("hidden", { timeout: DELETE_TIMEOUT_MS });
+    // Listen for the answer while clicking, so it can't arrive before anything is waiting for it.
+    const [answer] = await Promise.all([
+      row.page().waitForResponse((r) => r.request().method() === "POST" && r.url().startsWith(action), {
+        timeout: DELETE_TIMEOUT_MS,
+      }),
+      deleteButton.click(),
+    ]);
+    if (!answer.ok()) {
+      return { result: "failed", reason: `Last.fm answered the delete request with ${answer.status()}` };
+    }
+    const marked = await row
+      .page()
+      .waitForFunction(isMarkedDeleted, await row.elementHandle(), { timeout: DELETE_TIMEOUT_MS })
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!marked) {
+      return { result: "failed", reason: "Last.fm answered the delete request but didn't mark the row as deleted" };
+    }
     return { result: "deleted" };
   } catch (error) {
     // Playwright errors carry a multi-line call log; the first line says what went wrong.

@@ -64,7 +64,7 @@ A run deletes the scrobbles that match a banned artist or album. A dry run only 
 
 Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES`, if any artist in the scanned pages is on neither list, or if any unwanted scrobble was not deleted.
 
-Before deleting a scrobble, a real run checks that its row still shows the same artist, track and time, and skips it if not. A deletion only counts once Last.fm has removed the row; if that doesn't happen within 10 seconds it counts as failed. The run ends with how many scrobbles were deleted, skipped and failed.
+Before deleting a scrobble, a real run checks that its row still shows the same artist, track and time, and skips it if not. A deletion only counts once Last.fm has answered the delete request with a success and marked the row as deleted (it stays on the page, greyed out). An error answer, or no answer or mark within 10 seconds, counts as failed. The run ends with how many scrobbles were deleted, skipped and failed.
 
 Last.fm has no undo, so every attempt is appended to `data/deleted.log` as it happens: when, the outcome, the artist and track, when it was scrobbled, the album, and whether the artist or album matched, plus the reason for a failure. For example:
 
