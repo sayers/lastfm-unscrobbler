@@ -35,7 +35,7 @@ Settings live in `.env`:
 |---|---|
 | `LASTFM_USERNAME` | Your Last.fm username (required) |
 | `LASTFM_PASSWORD` | Your Last.fm password (required) |
-| `DEFAULT_PAGES` | How many library pages to scan (default `10`) |
+| `DEFAULT_PAGES` | How many library pages to scan when there is no record of a previous real run (default `10`) |
 | `MAX_PAGES` | The most library pages a single run will scan (default `50`) |
 
 ## Data files
@@ -45,15 +45,20 @@ Your lists live in the `data/` folder, which is kept out of source control. Each
 |---|---|
 | `data/banned.list.txt` | Artists whose scrobbles are deleted, e.g. `Peppa Pig` |
 | `data/banned.album.list.txt` | Albums whose scrobbles are deleted, as the path from the album's Last.fm URL, e.g. `music/Various+Artists/Shrek` |
+| `data/last-seen.json` | Written by the tool: the newest scrobble left after the last completed real run |
 
-Both files are required. Artist names must match Last.fm exactly.
+Both lists are required. Artist names must match Last.fm exactly. Delete `data/last-seen.json` to make the next run start from `DEFAULT_PAGES` again.
 
 ## How a run works
-A run checks the newest `DEFAULT_PAGES` pages of your library and deletes the scrobbles that match a banned artist or album. A dry run only lists them.
+A run deletes the scrobbles that match a banned artist or album. A dry run only lists them. Both scan the same pages:
 
-While the oldest page checked still has a scrobble to delete, the run checks one more page. It stops at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
+1. Read library pages from page 1 back to the last-seen scrobble from the previous real run, then 2 pages further. With no previous run, read `DEFAULT_PAGES` pages.
+2. While the oldest page read still has a scrobble to delete, read one more page.
+3. Stop at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
 
-Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked.
+Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. If the run stopped at `MAX_PAGES`, the record is left unchanged so the next run covers the same ground again.
+
+A dry run never deletes anything and never updates `data/last-seen.json`.
 
 ## Development
 ```bash

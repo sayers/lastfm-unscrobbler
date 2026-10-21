@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
 import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
+import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
@@ -30,6 +31,14 @@ if (!existsSync(BANNED_ARTISTS_FILE)) {
 if (!existsSync(BANNED_ALBUMS_FILE)) {
   problems.push(
     `No banned album list found at ${resolve(BANNED_ALBUMS_FILE)}. Create it with one album path per line, e.g. music/Artist/Album.`,
+  );
+}
+let lastSeen: LastSeen | undefined;
+try {
+  lastSeen = await readLastSeen();
+} catch (error) {
+  problems.push(
+    `Could not read ${resolve(LAST_SEEN_FILE)} (${error instanceof Error ? error.message : String(error)}). Fix or delete it; without it the run scans DEFAULT_PAGES pages.`,
   );
 }
 if (problems.length > 0 || !USERNAME || !PASSWORD) {
@@ -124,23 +133,61 @@ const isUnwanted = (scrobble: Scrobble) =>
   bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
 
 const lastPage = await readLastPageNumber(page, USERNAME);
-let pageCount = Math.min(DEFAULT_PAGES, lastPage);
+const pageLimit = Math.min(MAX_PAGES, lastPage);
+
+// The first page whose oldest scrobble is older than the previous real run's newest one.
+const findLastSeenPage = async ({ timestamp }: LastSeen) => {
+  for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber++) {
+    const oldest = (await readLibraryPage(page, USERNAME, pageNumber)).at(-1);
+    if (oldest && oldest.timestamp < timestamp) {
+      return pageNumber;
+    }
+  }
+  return undefined;
+};
+
+let pageCount: number;
 let reachedMaxPages = false;
+if (lastSeen === undefined) {
+  console.log(`No record of a previous real run, so starting with ${DEFAULT_PAGES} pages.`);
+  pageCount = Math.min(DEFAULT_PAGES, lastPage);
+} else {
+  console.log(
+    `Looking for the previous real run's newest scrobble: ${lastSeen.artist} - ${lastSeen.track} at ${lastSeen.timestamp.toLocaleString()}`,
+  );
+  const lastSeenPage = await findLastSeenPage(lastSeen);
+  if (lastSeenPage === undefined) {
+    pageCount = pageLimit;
+    reachedMaxPages = pageLimit < lastPage;
+    if (reachedMaxPages) {
+      console.warn(
+        `Warning: stopped at MAX_PAGES (${MAX_PAGES}) before reaching the previous real run's newest scrobble, so there may be more to delete further back.`,
+      );
+    }
+  } else {
+    // Go 2 pages past it, in case anything around it was missed.
+    pageCount = Math.min(lastSeenPage + 2, pageLimit);
+    console.log(`Found it on page ${lastSeenPage}, so starting with ${pageCount} pages.`);
+  }
+}
+
 // Unwanted scrobbles on the oldest page scanned may carry on beyond it, so keep going back until a page has none.
-while (pageCount < lastPage && (await readLibraryPage(page, USERNAME, pageCount)).some(isUnwanted)) {
+while (
+  !reachedMaxPages &&
+  pageCount < lastPage &&
+  (await readLibraryPage(page, USERNAME, pageCount)).some(isUnwanted)
+) {
   if (pageCount === MAX_PAGES) {
     reachedMaxPages = true;
+    console.warn(
+      `Warning: stopped at MAX_PAGES (${MAX_PAGES}) but page ${MAX_PAGES} still has unwanted scrobbles, so there may be more further back.`,
+    );
     break;
   }
   console.log(`Page ${pageCount} has unwanted scrobbles, so page ${pageCount + 1} will be scanned too.`);
   pageCount++;
 }
 console.log(`Scanning ${pageCount} pages`);
-if (reachedMaxPages) {
-  console.warn(
-    `Warning: stopped at MAX_PAGES (${MAX_PAGES}) but page ${MAX_PAGES} still has unwanted scrobbles, so there may be more further back.`,
-  );
-}
 
 // Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
 for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
@@ -160,6 +207,21 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
     await row.locator(".chartlist-more button.chartlist-more-button").click();
     await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
     await page.waitForTimeout(1000);
+  }
+}
+
+// Only a completed real run moves the starting point on; otherwise the next run covers the same ground again.
+if (dryRun) {
+  console.log("Dry run, so the last-seen scrobble was not updated.");
+} else if (reachedMaxPages) {
+  console.warn("The last-seen scrobble was not updated because the run stopped at MAX_PAGES.");
+} else {
+  const [newest] = await readLibraryPage(page, USERNAME, 1);
+  if (newest) {
+    await writeLastSeen(newest);
+    console.log(
+      `Recorded the newest scrobble for next time: ${newest.artist} - ${newest.track} at ${newest.timestamp.toLocaleString()}`,
+    );
   }
 }
 
