@@ -4,8 +4,13 @@ import type { Scrobble } from "./library.ts";
 
 export const SUGGESTIONS_FILE = "./data/suggestions.txt";
 
-// An artist needs at least this many plays in the scanned pages before it is worth suggesting.
+// An artist or album needs at least this many plays in the scanned pages before it is worth suggesting.
 const MIN_PLAYS = 3;
+
+const LASTFM_URL = "https://www.last.fm/";
+// Album paths look like music/Artist/Album; a track path has an extra /_/ part.
+const ALBUM_PATH = /^music\/[^/]+\/[^/]+$/;
+const COMPILATION_PREFIX = "music/Various+Artists/";
 
 export type Session = { scrobbles: Scrobble[]; banned: boolean };
 
@@ -52,6 +57,36 @@ export const suggestArtistsToBan = (sessions: Session[], isListed: (artist: stri
       name: artist,
       reason: `${inBanned} of ${total} plays in banned sessions`,
     }));
+};
+
+// Albums that only turn up in banned sessions but can't be banned by artist:
+// compilations, whose tracks are by many artists, and albums by allow-listed artists.
+// Suggested as paths, e.g. music/Various+Artists/Shrek, ready for the banned album list.
+export const suggestAlbumsToBan = (
+  sessions: Session[],
+  isAllowed: (artist: string) => boolean,
+  isBannedAlbum: (album: string) => boolean,
+): Suggestion[] => {
+  const plays = new Map<string, { total: number; inBanned: number; by: string }>();
+  for (const { scrobbles, banned } of sessions) {
+    for (const { artist, album } of scrobbles) {
+      const path = album.startsWith(LASTFM_URL) ? album.slice(LASTFM_URL.length) : "";
+      const compilation = path.startsWith(COMPILATION_PREFIX);
+      if (!ALBUM_PATH.test(path) || isBannedAlbum(album) || !(compilation || isAllowed(artist))) {
+        continue;
+      }
+      const counts = plays.get(path) ?? { total: 0, inBanned: 0, by: compilation ? "compilation" : `by ${artist}` };
+      counts.total++;
+      if (banned) {
+        counts.inBanned++;
+      }
+      plays.set(path, counts);
+    }
+  }
+  return [...plays]
+    .filter(([, { total, inBanned }]) => total >= MIN_PLAYS && inBanned === total)
+    .sort(([pathA, a], [pathB, b]) => b.total - a.total || pathA.localeCompare(pathB))
+    .map(([path, { total, by }]) => ({ name: path, reason: `${by}, all ${total} plays in banned sessions` }));
 };
 
 const formatSuggestion = ({ name, reason }: Suggestion) => `${name}  # ${reason}`;

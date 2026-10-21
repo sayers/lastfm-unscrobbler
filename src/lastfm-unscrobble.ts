@@ -9,6 +9,7 @@ import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts
 import {
   printSuggestions,
   SUGGESTIONS_FILE,
+  suggestAlbumsToBan,
   suggestArtistsToBan,
   toSessions,
   writeSuggestions,
@@ -242,6 +243,14 @@ if (dryRun) {
       suggestions: suggestArtistsToBan(
         sessions,
         (artist) => bannedLookups.artists.has(artist) || allowedArtists.has(artist),
+      ),
+    },
+    {
+      title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
+      suggestions: suggestAlbumsToBan(
+        sessions,
+        (artist) => allowedArtists.has(artist),
+        (album) => bannedLookups.albums.has(album),
       ),
     },
   ];

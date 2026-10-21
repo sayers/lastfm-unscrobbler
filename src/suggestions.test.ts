@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { Locator } from "playwright";
 
 import type { Scrobble } from "./library.ts";
-import { formatSuggestions, type Session, suggestArtistsToBan, toSessions } from "./suggestions.ts";
+import { formatSuggestions, type Session, suggestAlbumsToBan, suggestArtistsToBan, toSessions } from "./suggestions.ts";
 
 const bannedArtists = new Set(["Peppa Pig", "Bluey"]);
 const isUnwanted = (scrobble: Scrobble) => bannedArtists.has(scrobble.artist);
@@ -19,6 +19,15 @@ const scrobble = (artist: string, minute: number): Scrobble => ({
 
 const session = (banned: boolean, ...artists: string[]): Session => ({
   scrobbles: artists.map((artist, i) => scrobble(artist, i)),
+  banned,
+});
+
+// A session of plays given as [artist, album path] pairs.
+const albumSession = (banned: boolean, ...plays: [artist: string, albumPath: string][]): Session => ({
+  scrobbles: plays.map(([artist, albumPath], i) => ({
+    ...scrobble(artist, i),
+    album: `https://www.last.fm/${albumPath}`,
+  })),
   banned,
 });
 
@@ -102,6 +111,79 @@ describe("suggestArtistsToBan", () => {
     assert.deepEqual(
       suggestArtistsToBan(sessions, notListed).map(({ name }) => name),
       ["Five", "ThreeOfThree", "ThreeOfFour"],
+    );
+  });
+});
+
+describe("suggestAlbumsToBan", () => {
+  const SHREK = "music/Various+Artists/Shrek";
+  const CINDERELLA = "music/Various+Artists/Cinderella";
+  const GIRL = "music/Pharrell+Williams/G+I+R+L";
+  const isAllowed = (artist: string) => artist === "Pharrell Williams";
+  const notBanned = () => false;
+
+  it("suggests a compilation that only turns up in banned sessions", () => {
+    const sessions = [
+      albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK]),
+      albumSession(true, ["Smash Mouth", SHREK]),
+    ];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), [
+      { name: SHREK, reason: "compilation, all 3 plays in banned sessions" },
+    ]);
+  });
+
+  it("suggests an album by an allow-listed artist that only turns up in banned sessions", () => {
+    const sessions = [
+      albumSession(true, ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL]),
+      albumSession(true, ["Pharrell Williams", GIRL]),
+    ];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), [
+      { name: GIRL, reason: "by Pharrell Williams, all 3 plays in banned sessions" },
+    ]);
+  });
+
+  it("leaves albums by other artists to the artist suggestions", () => {
+    const frozen = "music/Josh+Gad/Frozen";
+    const sessions = [albumSession(true, ["Josh Gad", frozen], ["Josh Gad", frozen], ["Josh Gad", frozen])];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+  });
+
+  it("needs every play to be in a banned session", () => {
+    const sessions = [
+      albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK]),
+      albumSession(false, ["Smash Mouth", SHREK]),
+    ];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+  });
+
+  it("needs at least 3 plays", () => {
+    const sessions = [albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK])];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+  });
+
+  it("skips albums that are already banned", () => {
+    const sessions = [albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK], ["Smash Mouth", SHREK])];
+    const isBannedAlbum = (album: string) => album === `https://www.last.fm/${SHREK}`;
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, isBannedAlbum), []);
+  });
+
+  it("skips links that are not albums", () => {
+    const track = "music/Pharrell+Williams/_/Happy";
+    const sessions = [
+      albumSession(true, ["Pharrell Williams", track], ["Pharrell Williams", track], ["Pharrell Williams", track]),
+    ];
+    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+  });
+
+  it("puts the most played albums first, then sorts by path", () => {
+    const sessions = [
+      albumSession(true, ["A", CINDERELLA], ["B", CINDERELLA], ["C", CINDERELLA]),
+      albumSession(true, ["A", SHREK], ["B", SHREK], ["C", SHREK], ["D", SHREK]),
+      albumSession(true, ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL]),
+    ];
+    assert.deepEqual(
+      suggestAlbumsToBan(sessions, isAllowed, notBanned).map(({ name }) => name),
+      [SHREK, GIRL, CINDERELLA],
     );
   });
 });

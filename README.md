@@ -66,9 +66,12 @@ A dry run never deletes anything and never updates `data/last-seen.json`.
 ## Suggestions
 A dry run groups the scanned scrobbles into listening sessions, split wherever there is a gap longer than `SESSION_GAP_MINUTES`. A session counts as banned when at least half of its scrobbles would be deleted.
 
-It then suggests **artists to ban**: artists in neither list who appear at least 3 times, mostly in banned sessions.
+From those sessions it suggests:
 
-Each suggestion comes with its reason, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the names you agree with into `data/banned.list.txt`, without the `# ...` reason. To stop an artist being suggested, add them to `data/allow.list.txt`.
+- **Artists to ban**: artists in neither list who appear at least 3 times, mostly in banned sessions.
+- **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and only ever in banned sessions. These are Various Artists compilations and albums by artists on your allow list.
+
+Each suggestion comes with its reason, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching banned list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. To stop an artist being suggested, add them to `data/allow.list.txt`.
 
 ## Development
 ```bash
