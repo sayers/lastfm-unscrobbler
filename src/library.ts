@@ -25,6 +25,17 @@ const parseTimestamp = (title: string) => {
   return new Date(Number(year), month, Number(day), (Number(hour) % 12) + (half === "pm" ? 12 : 0), Number(minute));
 };
 
+// The pagination always ends with the last page's number, either as a link or as the current page.
+export const readLastPageNumber = async (page: Page, username: string) => {
+  await page.goto(`https://www.last.fm/user/${username}/library?page=1`);
+  await page.locator(".chartlist-row--with-artist").first().waitFor();
+  const pages = page.locator(".pagination-page:not(.pagination-page--ellipsis)");
+  if ((await pages.count()) === 0) {
+    return 1;
+  }
+  return Number(((await pages.last().textContent()) ?? "").trim());
+};
+
 export const readLibraryPage = async (page: Page, username: string, pageNumber: number): Promise<Scrobble[]> => {
   await page.goto(`https://www.last.fm/user/${username}/library?page=${pageNumber}`);
 

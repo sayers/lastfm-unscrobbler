@@ -4,14 +4,18 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
 import { BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadBanned } from "./banned.ts";
-import { readLibraryPage } from "./library.ts";
+import { readLastPageNumber, readLibraryPage } from "./library.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
 const PASSWORD = process.env.LASTFM_PASSWORD;
+const DEFAULT_PAGES = Number(process.env.DEFAULT_PAGES || 10);
 
 const problems: string[] = [];
 if (!USERNAME || !PASSWORD) {
   problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
+}
+if (!Number.isInteger(DEFAULT_PAGES) || DEFAULT_PAGES < 1) {
+  problems.push(`DEFAULT_PAGES in .env must be a whole number of at least 1, not "${process.env.DEFAULT_PAGES}".`);
 }
 if (!existsSync(BANNED_ARTISTS_FILE)) {
   problems.push(
@@ -111,24 +115,30 @@ if (login.result !== "loggedIn") {
 console.log("Log in successful, going to library.");
 
 const bannedLookups = await loadBanned();
-const scrobbles = await readLibraryPage(page, USERNAME, 1);
-console.log(`Processing ${scrobbles.length} scrobbles`);
+const pageCount = Math.min(DEFAULT_PAGES, await readLastPageNumber(page, USERNAME));
+console.log(`Scanning ${pageCount} pages`);
 
-const unwanted = scrobbles.filter(
-  (scrobble) => bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album),
-);
+// Work from the oldest page back to page 1: deleting on a page only shifts the pages after it, which are already done.
+for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
+  const scrobbles = await readLibraryPage(page, USERNAME, pageNumber);
+  console.log(`Page ${pageNumber}: processing ${scrobbles.length} scrobbles`);
 
-// Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
-for (const { artist, album, row } of unwanted.toReversed()) {
-  console.log(`Unwanted scrobble: ${artist} - ${album} `);
-  console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
-  if (dryRun) {
-    continue;
+  const unwanted = scrobbles.filter(
+    (scrobble) => bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album),
+  );
+
+  // Delete bottom-up so removing a row doesn't shift the rows still to be deleted.
+  for (const { artist, album, row } of unwanted.toReversed()) {
+    console.log(`Unwanted scrobble: ${artist} - ${album} `);
+    console.log(`Matched on Name: ${bannedLookups.artists.has(artist)} Album: ${bannedLookups.albums.has(album)} `);
+    if (dryRun) {
+      continue;
+    }
+    await row.hover();
+    await row.locator(".chartlist-more button.chartlist-more-button").click();
+    await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
+    await page.waitForTimeout(1000);
   }
-  await row.hover();
-  await row.locator(".chartlist-more button.chartlist-more-button").click();
-  await row.locator('.chartlist-more [type="submit"].more-item--delete').click();
-  await page.waitForTimeout(1000);
 }
 
 await browser.close();
