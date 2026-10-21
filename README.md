@@ -17,7 +17,11 @@ When the family shares one Last.fm account, the kids' music ends up all over you
    npx playwright install chromium
    ```
 2. Copy `.env-example` to `.env` and fill in your details (see [Configuration](#configuration)).
-3. Create the `data/` folder with your lists (see [Data files](#data-files)).
+3. Store your Last.fm password in your system's credential store (see [Your password](#your-password)). You type it in, without it being shown, and it never goes in a file:
+   ```bash
+   npm run set-password
+   ```
+4. Create the `data/` folder with your lists (see [Data files](#data-files)).
 
 ## Usage
 | Command | What it does |
@@ -34,7 +38,7 @@ Settings live in `.env`:
 | Setting | Meaning |
 |---|---|
 | `LASTFM_USERNAME` | Your Last.fm username (required) |
-| `LASTFM_PASSWORD` | Your Last.fm password (required) |
+| `LASTFM_PASSWORD` | Normally not needed: use `npm run set-password`. Still read as a fallback, with a warning, when no password is stored, e.g. on a Linux server without a keyring |
 | `DEFAULT_PAGES` | How many library pages to scan when there is no record of a previous real run (default `10`) |
 | `MAX_PAGES` | The most library pages a single run will scan (default `50`) |
 | `SESSION_GAP_MINUTES` | A gap longer than this between scrobbles starts a new listening session (default `30`) |
@@ -87,6 +91,19 @@ From those judgements it suggests:
 - **Artists to decide**: every other unknown artist, with mixed neighbours or none clear enough to guess from.
 
 Every unknown artist appears in exactly one of the three artist sections, even after a single play, so none can be missed. The play counts in each reason show how strong the guess is, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. Once an artist is on either list, it is no longer suggested.
+
+## Your password
+The password is kept in your system's credential store, under the name `lastfm-unscrobbler` and your Last.fm username. Run `npm run set-password` again whenever you change it on Last.fm.
+
+| System | Where it's kept | To see or remove it |
+|---|---|---|
+| Windows | Credential Manager | Control Panel → Credential Manager → Windows Credentials |
+| macOS | Keychain | Keychain Access |
+| Linux | Your desktop keyring through the Secret Service, e.g. GNOME Keyring, KWallet or KeePassXC | Your keyring app, e.g. Seahorse (Passwords and Keys) |
+
+On Linux without a desktop keyring, such as a headless server, the password ends up in the kernel keyring instead, which is kept in memory and lost on restart. There, keep using `LASTFM_PASSWORD` in `.env`.
+
+A credential store keeps the password out of plain-text files, backups and synced folders. It does not stop other programs running as you from reading it, so use a password for Last.fm that you don't use anywhere else.
 
 ## Development
 ```bash

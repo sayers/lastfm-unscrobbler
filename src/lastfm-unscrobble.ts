@@ -13,6 +13,7 @@ import {
   loadBanned,
   readList,
 } from "./banned.ts";
+import { readStoredPassword } from "./credentials.ts";
 import { appendToDeletedLog, DELETED_LOG_FILE } from "./deleted-log.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { deleteScrobble, readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
@@ -31,14 +32,41 @@ import {
 } from "./suggestions.ts";
 
 const USERNAME = process.env.LASTFM_USERNAME;
-const PASSWORD = process.env.LASTFM_PASSWORD;
 const DEFAULT_PAGES = Number(process.env.DEFAULT_PAGES || 10);
 const MAX_PAGES = Number(process.env.MAX_PAGES || 50);
 const SESSION_GAP_MINUTES = Number(process.env.SESSION_GAP_MINUTES || 30);
 
+// The password comes from the system's credential store (npm run set-password).
+// LASTFM_PASSWORD in .env still works as a fallback while switching over.
+const findPassword = (username: string): { password?: string; fromEnv?: boolean; problem?: string } => {
+  let stored: string | undefined;
+  let storeProblem: string | undefined;
+  try {
+    stored = readStoredPassword(username);
+  } catch (error) {
+    storeProblem = `Could not read the password from your system's credential store (${error instanceof Error ? error.message : String(error)}).`;
+  }
+  if (stored !== undefined) {
+    return { password: stored };
+  }
+  if (process.env.LASTFM_PASSWORD) {
+    return { password: process.env.LASTFM_PASSWORD, fromEnv: true };
+  }
+  return {
+    problem:
+      storeProblem ??
+      `No password stored for ${username}. Run "npm run set-password" to store it in your system's credential store.`,
+  };
+};
+
 const problems: string[] = [];
-if (!USERNAME || !PASSWORD) {
-  problems.push("LASTFM_USERNAME and LASTFM_PASSWORD must both be set in .env.");
+const {
+  password: PASSWORD,
+  fromEnv: passwordFromEnv,
+  problem: passwordProblem,
+} = USERNAME ? findPassword(USERNAME) : { problem: "LASTFM_USERNAME must be set in .env." };
+if (passwordProblem) {
+  problems.push(passwordProblem);
 }
 if (!Number.isInteger(DEFAULT_PAGES) || DEFAULT_PAGES < 1) {
   problems.push(`DEFAULT_PAGES in .env must be a whole number of at least 1, not "${process.env.DEFAULT_PAGES}".`);
@@ -73,6 +101,15 @@ try {
 if (problems.length > 0 || !USERNAME || !PASSWORD) {
   console.error(`Cannot start:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`);
   process.exit(1);
+}
+if (passwordFromEnv) {
+  console.warn(
+    'Warning: using LASTFM_PASSWORD from .env. Run "npm run set-password" to store it in your system\'s credential store, then remove it from .env.',
+  );
+} else if (process.env.LASTFM_PASSWORD) {
+  console.warn(
+    "Warning: the password is now read from your system's credential store, so LASTFM_PASSWORD in .env isn't used. Remove it from .env.",
+  );
 }
 if (!existsSync(ALLOWED_ARTISTS_FILE)) {
   console.warn(
