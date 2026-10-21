@@ -51,7 +51,7 @@ export const readLibraryPage = async (page: Page, username: string, pageNumber: 
       continue;
     }
     scrobbles.push({
-      artist: (await artist.first().innerHTML()).trim(),
+      artist: ((await artist.first().textContent()) ?? "").trim(),
       track: ((await row.locator(".chartlist-name a").first().textContent()) ?? "").trim(),
       // Read the resolved href property (absolute URL) rather than the raw attribute.
       album: (
