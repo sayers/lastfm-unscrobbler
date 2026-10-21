@@ -3,7 +3,16 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
-import { ALLOWED_ARTISTS_FILE, BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadAllowed, loadBanned } from "./banned.ts";
+import {
+  ALLOWED_ARTISTS_FILE,
+  BANNED_ALBUMS_FILE,
+  BANNED_ARTISTS_FILE,
+  findConflicts,
+  findDuplicates,
+  loadAllowed,
+  loadBanned,
+  readList,
+} from "./banned.ts";
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
@@ -66,6 +75,23 @@ if (!existsSync(ALLOWED_ARTISTS_FILE)) {
   console.warn(
     `Warning: no allow list found at ${resolve(ALLOWED_ARTISTS_FILE)}. It would be wise to create it with one artist name per line for the artists that are yours, so they are never suggested for banning.`,
   );
+}
+
+// Check the lists before logging in, so mistakes in them are caught straight away.
+for (const file of [BANNED_ARTISTS_FILE, BANNED_ALBUMS_FILE, ALLOWED_ARTISTS_FILE].filter((file) => existsSync(file))) {
+  const duplicates = findDuplicates(await readList(file));
+  if (duplicates.length > 0) {
+    console.warn(`Warning: ${resolve(file)} lists these more than once: ${duplicates.join(", ")}`);
+  }
+}
+const bannedLookups = await loadBanned();
+const allowedArtists = await loadAllowed();
+const conflicts = findConflicts(bannedLookups.artists, allowedArtists);
+if (conflicts.length > 0) {
+  console.error(
+    `Cannot start: these artists are on both ${resolve(BANNED_ARTISTS_FILE)} and ${resolve(ALLOWED_ARTISTS_FILE)}. Remove each one from the list it doesn't belong on:\n${conflicts.map((artist) => `  - ${artist}`).join("\n")}`,
+  );
+  process.exit(1);
 }
 
 const { values } = parseArgs({
@@ -150,10 +176,8 @@ if (login.result !== "loggedIn") {
 }
 console.log("Log in successful, going to library.");
 
-const bannedLookups = await loadBanned();
 const isUnwanted = (scrobble: Scrobble) =>
   bannedLookups.artists.has(scrobble.artist) || bannedLookups.albums.has(scrobble.album);
-const allowedArtists = await loadAllowed();
 
 const lastPage = await readLastPageNumber(page, USERNAME);
 const pageLimit = Math.min(MAX_PAGES, lastPage);

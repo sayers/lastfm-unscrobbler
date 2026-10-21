@@ -50,7 +50,9 @@ Your lists live in the `data/` folder, which is kept out of source control. Each
 | `data/last-seen.json` | Written by the tool: the newest scrobble left after the last completed real run |
 | `data/suggestions.txt` | Written by the tool: the suggestions from the latest dry run |
 
-Both banned lists are required. The allow list is optional, but the tool warns when it is missing, as suggestions are noisier without it. Artist names must match Last.fm exactly. Delete `data/last-seen.json` to make the next run start from `DEFAULT_PAGES` again.
+Both banned lists are required. The allow list is optional, but the tool warns when it is missing, as suggestions are noisier without it. Artist names must match Last.fm exactly.
+
+The lists are checked before logging in. An artist on both the banned and allow lists stops the run, so you can decide which list it belongs on. An entry listed twice in the same list only gets a warning. Delete `data/last-seen.json` to make the next run start from `DEFAULT_PAGES` again.
 
 ## How a run works
 A run deletes the scrobbles that match a banned artist or album. A dry run only lists them. Both scan the same pages:
