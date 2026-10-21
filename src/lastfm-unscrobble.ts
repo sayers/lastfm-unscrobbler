@@ -18,6 +18,8 @@ import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./la
 import { deleteScrobble, readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
   findUnknownArtists,
+  type Judgement,
+  judgePlays,
   printSuggestions,
   SUGGESTIONS_FILE,
   suggestAlbumsToBan,
@@ -288,27 +290,31 @@ const unknownArtists = findUnknownArtists(
 const isUnknown = (artist: string) => unknownArtists.has(artist);
 
 if (dryRun) {
-  const sessions = toSessions(scanned, SESSION_GAP_MINUTES, isUnwanted);
+  const plays = judgePlays(toSessions(scanned, SESSION_GAP_MINUTES), isUnwanted, (artist) =>
+    allowedArtists.has(artist),
+  );
+  const unknownPlays = plays.filter(({ scrobble }) => isUnknown(scrobble.artist));
+  const judged = (judgement: Judgement) => unknownPlays.filter((play) => play.judgement === judgement).length;
   console.log(
-    `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
+    `Judged ${unknownPlays.length} plays by unknown artists by their nearby scrobbles: ${judged("near banned")} next to banned scrobbles, ${judged("near own")} next to your own, ${judged("unclear")} unclear.`,
   );
   const sections = [
-    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isUnknown) },
+    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(plays, isUnknown) },
     {
       title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
       suggestions: suggestAlbumsToBan(
-        sessions,
+        plays,
         (artist) => allowedArtists.has(artist),
         (album) => bannedLookups.albums.has(album),
       ),
     },
     {
       title: `Artists to allow (add to ${ALLOWED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToAllow(sessions, isUnknown),
+      suggestions: suggestArtistsToAllow(plays, isUnknown),
     },
     {
       title: `Artists to decide (add to ${BANNED_ARTISTS_FILE} or ${ALLOWED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToDecide(sessions, isUnknown),
+      suggestions: suggestArtistsToDecide(plays, isUnknown),
     },
   ];
   printSuggestions(sections);

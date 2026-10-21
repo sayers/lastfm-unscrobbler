@@ -13,46 +13,85 @@ const LASTFM_URL = "https://www.last.fm/";
 const ALBUM_PATH = /^music\/[^/]+\/[^/]+$/;
 const COMPILATION_PREFIX = "music/Various+Artists/";
 
-export type Session = { scrobbles: Scrobble[]; banned: boolean };
+// How many known scrobbles on each side of a play it is judged by.
+const NEIGHBOURS = 3;
+
+export type Judgement = "near banned" | "near own" | "unclear";
+
+export type JudgedPlay = { scrobble: Scrobble; judgement: Judgement };
 
 export type Suggestion = { name: string; reason: string };
 
 export type SuggestionSection = { title: string; suggestions: Suggestion[] };
 
-// Split scrobbles into listening sessions wherever there is a gap longer than gapMinutes.
-// A session counts as banned when at least half of its scrobbles would be deleted.
-export const toSessions = (
-  scrobbles: Scrobble[],
-  gapMinutes: number,
-  isUnwanted: (scrobble: Scrobble) => boolean,
-): Session[] => {
-  const groups: Scrobble[][] = [];
+// Split scrobbles, oldest first, into listening sessions wherever there is a gap longer than gapMinutes.
+export const toSessions = (scrobbles: Scrobble[], gapMinutes: number): Scrobble[][] => {
+  const sessions: Scrobble[][] = [];
   let previous: Scrobble | undefined;
   for (const scrobble of scrobbles.toSorted((a, b) => a.timestamp.getTime() - b.timestamp.getTime())) {
     if (!previous || scrobble.timestamp.getTime() - previous.timestamp.getTime() > gapMinutes * 60_000) {
-      groups.push([]);
+      sessions.push([]);
     }
-    groups[groups.length - 1].push(scrobble);
+    sessions[sessions.length - 1].push(scrobble);
     previous = scrobble;
   }
-  return groups.map((group) => ({ scrobbles: group, banned: group.filter(isUnwanted).length * 2 >= group.length }));
+  return sessions;
 };
 
-// Each artist's plays, and how many of them were in banned sessions.
-const countArtistPlays = (sessions: Session[]) => {
-  const plays = new Map<string, { total: number; inBanned: number }>();
-  for (const { scrobbles, banned } of sessions) {
-    for (const { artist } of scrobbles) {
-      const counts = plays.get(artist) ?? { total: 0, inBanned: 0 };
-      counts.total++;
-      if (banned) {
-        counts.inBanned++;
+// Judge every play by up to NEIGHBOURS known scrobbles on each side of it in its session:
+// banned ones (that would be deleted) against your own (allow-listed artists).
+// Unknown neighbours are skipped, so unknown artists played together can't vouch for each other,
+// and a session boundary stops the search, so a long break keeps one listener's music from judging another's.
+export const judgePlays = (
+  sessions: Scrobble[][],
+  isUnwanted: (scrobble: Scrobble) => boolean,
+  isAllowed: (artist: string) => boolean,
+): JudgedPlay[] =>
+  sessions.flatMap((session) => {
+    const kinds = session.map((scrobble) =>
+      isUnwanted(scrobble) ? "banned" : isAllowed(scrobble.artist) ? "own" : undefined,
+    );
+    return session.map((scrobble, i): JudgedPlay => {
+      let banned = 0;
+      let own = 0;
+      for (const step of [-1, 1]) {
+        let found = 0;
+        for (let j = i + step; j >= 0 && j < session.length && found < NEIGHBOURS; j += step) {
+          if (kinds[j] === undefined) {
+            continue;
+          }
+          found++;
+          if (kinds[j] === "banned") {
+            banned++;
+          } else {
+            own++;
+          }
+        }
       }
-      plays.set(artist, counts);
+      return { scrobble, judgement: banned > own ? "near banned" : own > banned ? "near own" : "unclear" };
+    });
+  });
+
+// Each artist's plays, and how many of them were judged next to banned scrobbles or to your own.
+const countArtistPlays = (plays: JudgedPlay[]) => {
+  const counts = new Map<string, { total: number; nearBanned: number; nearOwn: number }>();
+  for (const { scrobble, judgement } of plays) {
+    const artistCounts = counts.get(scrobble.artist) ?? { total: 0, nearBanned: 0, nearOwn: 0 };
+    artistCounts.total++;
+    if (judgement === "near banned") {
+      artistCounts.nearBanned++;
+    } else if (judgement === "near own") {
+      artistCounts.nearOwn++;
     }
+    counts.set(scrobble.artist, artistCounts);
   }
-  return [...plays];
+  return [...counts];
 };
+
+type ArtistCounts = ReturnType<typeof countArtistPlays>[number][1];
+
+const isBanSuggestion = ({ total, nearBanned }: ArtistCounts) => nearBanned * 2 > total;
+const isAllowSuggestion = ({ nearBanned, nearOwn }: ArtistCounts) => nearBanned === 0 && nearOwn > 0;
 
 const playCount = (count: number) => `${count} ${count === 1 ? "play" : "plays"}`;
 
@@ -69,63 +108,70 @@ export const findUnknownArtists = (
 
 // Every unknown artist lands in exactly one of the next three: to ban, to allow, or to decide.
 
-// Unknown artists who turn up mostly in banned sessions.
-export const suggestArtistsToBan = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
-  countArtistPlays(sessions)
-    .filter(([artist, { total, inBanned }]) => isUnknown(artist) && inBanned * 2 > total)
-    .sort(([, a], [, b]) => b.inBanned - a.inBanned || a.total - b.total)
-    .map(([artist, { total, inBanned }]) => ({
+// Unknown artists with more than half their plays next to banned scrobbles.
+export const suggestArtistsToBan = (plays: JudgedPlay[], isUnknown: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(plays)
+    .filter(([artist, counts]) => isUnknown(artist) && isBanSuggestion(counts))
+    .sort(([, a], [, b]) => b.nearBanned - a.nearBanned || a.total - b.total)
+    .map(([artist, { total, nearBanned }]) => ({
       name: artist,
-      reason: `${inBanned} of ${playCount(total)} in banned sessions`,
+      reason: `${nearBanned} of ${playCount(total)} next to banned scrobbles`,
     }));
 
-// Unknown artists who never turn up in a banned session, so are most likely yours.
-export const suggestArtistsToAllow = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
-  countArtistPlays(sessions)
-    .filter(([artist, { inBanned }]) => isUnknown(artist) && inBanned === 0)
-    .sort(([artistA, a], [artistB, b]) => b.total - a.total || artistA.localeCompare(artistB))
-    .map(([artist, { total }]) => ({ name: artist, reason: `${playCount(total)}, none in banned sessions` }));
+// Unknown artists played next to your own music and never next to banned scrobbles, so most likely yours.
+export const suggestArtistsToAllow = (plays: JudgedPlay[], isUnknown: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(plays)
+    .filter(([artist, counts]) => isUnknown(artist) && isAllowSuggestion(counts))
+    .sort(([artistA, a], [artistB, b]) => b.nearOwn - a.nearOwn || artistA.localeCompare(artistB))
+    .map(([artist, { total, nearOwn }]) => ({
+      name: artist,
+      reason: `${nearOwn} of ${playCount(total)} next to your own, none next to banned`,
+    }));
 
-// Unknown artists split between banned sessions and yours, so there is no clear guess.
-export const suggestArtistsToDecide = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
-  countArtistPlays(sessions)
-    .filter(([artist, { total, inBanned }]) => isUnknown(artist) && inBanned > 0 && inBanned * 2 <= total)
+// Every other unknown artist: mixed neighbours, or none clear enough to guess from.
+export const suggestArtistsToDecide = (plays: JudgedPlay[], isUnknown: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(plays)
+    .filter(([artist, counts]) => isUnknown(artist) && !isBanSuggestion(counts) && !isAllowSuggestion(counts))
     .sort(
-      ([artistA, a], [artistB, b]) => b.inBanned - a.inBanned || b.total - a.total || artistA.localeCompare(artistB),
+      ([artistA, a], [artistB, b]) =>
+        b.nearBanned - a.nearBanned || b.total - a.total || artistA.localeCompare(artistB),
     )
-    .map(([artist, { total, inBanned }]) => ({
+    .map(([artist, { total, nearBanned, nearOwn }]) => ({
       name: artist,
-      reason: `${inBanned} of ${playCount(total)} in banned sessions`,
+      reason: `${nearBanned} of ${playCount(total)} next to banned, ${nearOwn} next to your own`,
     }));
 
-// Albums that only turn up in banned sessions but can't be banned by artist:
+// Albums whose every play is next to banned scrobbles but which can't be banned by artist:
 // compilations, whose tracks are by many artists, and albums by allow-listed artists.
 // Suggested as paths, e.g. music/Various+Artists/Shrek, ready for the banned album list.
 export const suggestAlbumsToBan = (
-  sessions: Session[],
+  plays: JudgedPlay[],
   isAllowed: (artist: string) => boolean,
   isBannedAlbum: (album: string) => boolean,
 ): Suggestion[] => {
-  const plays = new Map<string, { total: number; inBanned: number; by: string }>();
-  for (const { scrobbles, banned } of sessions) {
-    for (const { artist, album } of scrobbles) {
-      const path = album.startsWith(LASTFM_URL) ? album.slice(LASTFM_URL.length) : "";
-      const compilation = path.startsWith(COMPILATION_PREFIX);
-      if (!ALBUM_PATH.test(path) || isBannedAlbum(album) || !(compilation || isAllowed(artist))) {
-        continue;
-      }
-      const counts = plays.get(path) ?? { total: 0, inBanned: 0, by: compilation ? "compilation" : `by ${artist}` };
-      counts.total++;
-      if (banned) {
-        counts.inBanned++;
-      }
-      plays.set(path, counts);
+  const counts = new Map<string, { total: number; nearBanned: number; by: string }>();
+  for (const { scrobble, judgement } of plays) {
+    const { artist, album } = scrobble;
+    const path = album.startsWith(LASTFM_URL) ? album.slice(LASTFM_URL.length) : "";
+    const compilation = path.startsWith(COMPILATION_PREFIX);
+    if (!ALBUM_PATH.test(path) || isBannedAlbum(album) || !(compilation || isAllowed(artist))) {
+      continue;
     }
+    const albumCounts = counts.get(path) ?? {
+      total: 0,
+      nearBanned: 0,
+      by: compilation ? "compilation" : `by ${artist}`,
+    };
+    albumCounts.total++;
+    if (judgement === "near banned") {
+      albumCounts.nearBanned++;
+    }
+    counts.set(path, albumCounts);
   }
-  return [...plays]
-    .filter(([, { total, inBanned }]) => total >= MIN_ALBUM_PLAYS && inBanned === total)
+  return [...counts]
+    .filter(([, { total, nearBanned }]) => total >= MIN_ALBUM_PLAYS && nearBanned === total)
     .sort(([pathA, a], [pathB, b]) => b.total - a.total || pathA.localeCompare(pathB))
-    .map(([path, { total, by }]) => ({ name: path, reason: `${by}, all ${total} plays in banned sessions` }));
+    .map(([path, { total, by }]) => ({ name: path, reason: `${by}, all ${total} plays next to banned scrobbles` }));
 };
 
 const formatSuggestion = ({ name, reason }: Suggestion) => `${name}  # ${reason}`;

@@ -77,14 +77,14 @@ Every artist must end up on the banned or allow list. An artist on neither list,
 A dry run never deletes anything and never updates `data/last-seen.json`.
 
 ## Suggestions
-A dry run groups the scanned scrobbles into listening sessions, split wherever there is a gap longer than `SESSION_GAP_MINUTES`. A session counts as banned when at least half of its scrobbles would be deleted.
+A dry run judges each play by the scrobbles around it. It looks at up to 3 known scrobbles on each side: banned ones (scrobbles that would be deleted) and your own (allow-listed artists). Unknown artists next to it are skipped, so unknown artists played together can't vouch for each other. The search stops at a gap longer than `SESSION_GAP_MINUTES`, so a long break keeps one listener's music from judging another's. A play with more banned neighbours is next to banned scrobbles, one with more of your own is next to your own, and a tie or no known neighbours is unclear.
 
-From those sessions it suggests:
+From those judgements it suggests:
 
-- **Artists to ban**: unknown artists with more than half of their plays in banned sessions.
-- **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and only ever in banned sessions. These are Various Artists compilations and albums by artists on your allow list.
-- **Artists to allow**: unknown artists with no plays in banned sessions.
-- **Artists to decide**: unknown artists with some plays in banned sessions, but no more than half.
+- **Artists to ban**: unknown artists with more than half of their plays next to banned scrobbles.
+- **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and every time next to banned scrobbles. These are Various Artists compilations and albums by artists on your allow list.
+- **Artists to allow**: unknown artists played next to your own music and never next to banned scrobbles.
+- **Artists to decide**: every other unknown artist, with mixed neighbours or none clear enough to guess from.
 
 Every unknown artist appears in exactly one of the three artist sections, even after a single play, so none can be missed. The play counts in each reason show how strong the guess is, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. Once an artist is on either list, it is no longer suggested.
 

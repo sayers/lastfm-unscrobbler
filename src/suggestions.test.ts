@@ -6,7 +6,9 @@ import type { Scrobble } from "./library.ts";
 import {
   findUnknownArtists,
   formatSuggestions,
-  type Session,
+  type JudgedPlay,
+  type Judgement,
+  judgePlays,
   suggestAlbumsToBan,
   suggestArtistsToAllow,
   suggestArtistsToBan,
@@ -15,9 +17,10 @@ import {
 } from "./suggestions.ts";
 
 const bannedArtists = new Set(["Peppa Pig", "Bluey"]);
+const allowedArtists = new Set(["Portishead", "Leftfield"]);
 const isUnwanted = (scrobble: Scrobble) => bannedArtists.has(scrobble.artist);
-// With no allow list in these tests, every artist not banned is unknown.
-const isUnknown = (artist: string) => !bannedArtists.has(artist);
+const isAllowed = (artist: string) => allowedArtists.has(artist);
+const isUnknown = (artist: string) => !bannedArtists.has(artist) && !allowedArtists.has(artist);
 
 // A scrobble the given number of minutes after 9am; the row is never touched by the suggestion logic.
 const scrobble = (artist: string, minute: number): Scrobble => ({
@@ -28,58 +31,92 @@ const scrobble = (artist: string, minute: number): Scrobble => ({
   row: {} as Locator,
 });
 
-const session = (banned: boolean, ...artists: string[]): Session => ({
-  scrobbles: artists.map((artist, i) => scrobble(artist, i)),
-  banned,
-});
+// Scrobbles one minute apart, in the order given.
+const inOrder = (...artists: string[]) => artists.map((artist, i) => scrobble(artist, i));
 
-// A session of plays given as [artist, album path] pairs.
-const albumSession = (banned: boolean, ...plays: [artist: string, albumPath: string][]): Session => ({
-  scrobbles: plays.map(([artist, albumPath], i) => ({
-    ...scrobble(artist, i),
-    album: `https://www.last.fm/${albumPath}`,
-  })),
-  banned,
-});
+// Each scrobble's artist and judgement, in time order.
+const judge = (scrobbles: Scrobble[], gapMinutes = 30) =>
+  judgePlays(toSessions(scrobbles, gapMinutes), isUnwanted, isAllowed).map(
+    ({ scrobble, judgement }) => `${scrobble.artist}: ${judgement}`,
+  );
 
-const artistsIn = (sessions: Session[]) => sessions.map(({ scrobbles }) => scrobbles.map(({ artist }) => artist));
+// Plays already judged, for testing the suggestions on their own.
+const plays = (judgement: Judgement, ...artists: string[]): JudgedPlay[] =>
+  artists.map((artist, i) => ({ scrobble: scrobble(artist, i), judgement }));
+
+const albumPlays = (judgement: Judgement, ...entries: [artist: string, albumPath: string][]): JudgedPlay[] =>
+  entries.map(([artist, albumPath], i) => ({
+    scrobble: { ...scrobble(artist, i), album: `https://www.last.fm/${albumPath}` },
+    judgement,
+  }));
+
+const artistsIn = (sessions: Scrobble[][]) => sessions.map((session) => session.map(({ artist }) => artist));
 
 describe("toSessions", () => {
   it("starts a new session after a gap longer than the setting", () => {
-    const sessions = toSessions([scrobble("A", 0), scrobble("B", 10), scrobble("C", 41)], 30, isUnwanted);
+    const sessions = toSessions([scrobble("A", 0), scrobble("B", 10), scrobble("C", 41)], 30);
     assert.deepEqual(artistsIn(sessions), [["A", "B"], ["C"]]);
   });
 
   it("keeps a gap of exactly the setting in the same session", () => {
-    const sessions = toSessions([scrobble("A", 0), scrobble("B", 30)], 30, isUnwanted);
+    const sessions = toSessions([scrobble("A", 0), scrobble("B", 30)], 30);
     assert.deepEqual(artistsIn(sessions), [["A", "B"]]);
   });
 
   it("sorts scrobbles by time before splitting", () => {
-    const sessions = toSessions(
-      [scrobble("C", 100), scrobble("B", 10), scrobble("D", 110), scrobble("A", 0)],
-      30,
-      isUnwanted,
-    );
+    const sessions = toSessions([scrobble("C", 100), scrobble("B", 10), scrobble("D", 110), scrobble("A", 0)], 30);
     assert.deepEqual(artistsIn(sessions), [
       ["A", "B"],
       ["C", "D"],
     ]);
   });
 
-  it("counts a session as banned when at least half of it would be deleted", () => {
-    const [half] = toSessions([scrobble("Peppa Pig", 0), scrobble("Mine", 1)], 30, isUnwanted);
-    const [underHalf] = toSessions(
-      [scrobble("Peppa Pig", 0), scrobble("Mine", 1), scrobble("Mine", 2)],
-      30,
-      isUnwanted,
-    );
-    assert.equal(half.banned, true);
-    assert.equal(underHalf.banned, false);
+  it("returns no sessions for no scrobbles", () => {
+    assert.deepEqual(toSessions([], 30), []);
+  });
+});
+
+describe("judgePlays", () => {
+  it("judges a play between banned scrobbles as near banned", () => {
+    assert.deepEqual(judge(inOrder("Peppa Pig", "Josh Gad", "Bluey"))[1], "Josh Gad: near banned");
   });
 
-  it("returns no sessions for no scrobbles", () => {
-    assert.deepEqual(toSessions([], 30, isUnwanted), []);
+  it("judges a play between your own music as near own", () => {
+    assert.deepEqual(judge(inOrder("Portishead", "Massive Attack", "Leftfield"))[1], "Massive Attack: near own");
+  });
+
+  it("skips unknown neighbours, so unknown artists can't vouch for each other", () => {
+    assert.deepEqual(judge(inOrder("Peppa Pig", "Josh Gad", "KATSEYE", "Gummy Kid", "Bluey")).slice(1, 4), [
+      "Josh Gad: near banned",
+      "KATSEYE: near banned",
+      "Gummy Kid: near banned",
+    ]);
+    assert.deepEqual(judge(inOrder("Josh Gad", "KATSEYE")), ["Josh Gad: unclear", "KATSEYE: unclear"]);
+  });
+
+  it("counts at most 3 known neighbours on each side", () => {
+    // Before: Peppa Pig and two of the four Portishead plays; after: Bluey. 2 banned, 2 own.
+    const scrobbles = inOrder("Portishead", "Portishead", "Portishead", "Portishead", "Peppa Pig", "Josh Gad", "Bluey");
+    assert.deepEqual(judge(scrobbles)[5], "Josh Gad: unclear");
+  });
+
+  it("judges a tie, or a play with no known neighbours, as unclear", () => {
+    assert.deepEqual(judge(inOrder("Peppa Pig", "Josh Gad", "Portishead"))[1], "Josh Gad: unclear");
+    assert.deepEqual(judge(inOrder("Josh Gad")), ["Josh Gad: unclear"]);
+  });
+
+  it("doesn't look across a gap longer than the session setting", () => {
+    const scrobbles = [
+      scrobble("Peppa Pig", 0),
+      scrobble("Bluey", 1),
+      scrobble("Josh Gad", 40),
+      scrobble("Portishead", 41),
+    ];
+    assert.deepEqual(judge(scrobbles)[2], "Josh Gad: near own");
+  });
+
+  it("judges every scrobble, known ones included", () => {
+    assert.equal(judge(inOrder("Peppa Pig", "Josh Gad", "Portishead")).length, 3);
   });
 });
 
@@ -101,44 +138,108 @@ describe("findUnknownArtists", () => {
 });
 
 describe("suggestArtistsToBan", () => {
-  it("suggests an unknown artist mostly in banned sessions", () => {
-    const sessions = [
-      session(true, "Peppa Pig", "Josh Gad"),
-      session(false, "Mine", "Josh Gad"),
-      session(true, "Bluey", "Josh Gad"),
-    ];
-    assert.deepEqual(suggestArtistsToBan(sessions, isUnknown), [
-      { name: "Josh Gad", reason: "2 of 3 plays in banned sessions" },
+  it("suggests an unknown artist with more than half its plays next to banned scrobbles", () => {
+    const judged = [...plays("near banned", "Josh Gad", "Josh Gad"), ...plays("near own", "Josh Gad")];
+    assert.deepEqual(suggestArtistsToBan(judged, isUnknown), [
+      { name: "Josh Gad", reason: "2 of 3 plays next to banned scrobbles" },
     ]);
   });
 
-  it("suggests an artist with a single play in a banned session", () => {
-    const sessions = [session(true, "Peppa Pig", "Josh Gad")];
-    assert.deepEqual(suggestArtistsToBan(sessions, isUnknown), [
-      { name: "Josh Gad", reason: "1 of 1 play in banned sessions" },
+  it("suggests an artist with a single play next to banned scrobbles", () => {
+    assert.deepEqual(suggestArtistsToBan(plays("near banned", "Josh Gad"), isUnknown), [
+      { name: "Josh Gad", reason: "1 of 1 play next to banned scrobbles" },
     ]);
   });
 
-  it("needs more than half of the plays in banned sessions", () => {
-    const sessions = [session(true, "Josh Gad", "Josh Gad"), session(false, "Josh Gad", "Josh Gad")];
-    assert.deepEqual(suggestArtistsToBan(sessions, isUnknown), []);
+  it("needs more than half of the plays next to banned scrobbles", () => {
+    const judged = [...plays("near banned", "Josh Gad", "Josh Gad"), ...plays("near own", "Josh Gad", "Josh Gad")];
+    assert.deepEqual(suggestArtistsToBan(judged, isUnknown), []);
   });
 
   it("skips artists that are not unknown", () => {
-    const sessions = [session(true, "Josh Gad", "Josh Gad", "Josh Gad", "Peppa Pig")];
-    const suggestions = suggestArtistsToBan(sessions, (artist) => artist !== "Josh Gad" && isUnknown(artist));
-    assert.deepEqual(suggestions, []);
+    assert.deepEqual(suggestArtistsToBan(plays("near banned", "Peppa Pig", "Portishead"), isUnknown), []);
   });
 
-  it("puts the most plays in banned sessions first, then the fewest plays overall", () => {
-    const sessions = [
-      session(true, "Five", "Five", "Five", "Five", "Five"),
-      session(true, "ThreeOfFour", "ThreeOfFour", "ThreeOfFour", "ThreeOfThree", "ThreeOfThree", "ThreeOfThree"),
-      session(false, "ThreeOfFour"),
+  it("puts the most plays next to banned scrobbles first, then the fewest plays overall", () => {
+    const judged = [
+      ...plays("near banned", "Five", "Five", "Five", "Five", "Five"),
+      ...plays(
+        "near banned",
+        "ThreeOfFour",
+        "ThreeOfFour",
+        "ThreeOfFour",
+        "ThreeOfThree",
+        "ThreeOfThree",
+        "ThreeOfThree",
+      ),
+      ...plays("unclear", "ThreeOfFour"),
     ];
     assert.deepEqual(
-      suggestArtistsToBan(sessions, isUnknown).map(({ name }) => name),
+      suggestArtistsToBan(judged, isUnknown).map(({ name }) => name),
       ["Five", "ThreeOfThree", "ThreeOfFour"],
+    );
+  });
+});
+
+describe("suggestArtistsToAllow", () => {
+  it("suggests an unknown artist played next to your own and never next to banned scrobbles", () => {
+    const judged = [...plays("near own", "Massive Attack", "Massive Attack"), ...plays("unclear", "Massive Attack")];
+    assert.deepEqual(suggestArtistsToAllow(judged, isUnknown), [
+      { name: "Massive Attack", reason: "2 of 3 plays next to your own, none next to banned" },
+    ]);
+  });
+
+  it("suggests an artist with a single play next to your own", () => {
+    assert.deepEqual(suggestArtistsToAllow(plays("near own", "Massive Attack"), isUnknown), [
+      { name: "Massive Attack", reason: "1 of 1 play next to your own, none next to banned" },
+    ]);
+  });
+
+  it("rules out an artist with any play next to banned scrobbles", () => {
+    const judged = [
+      ...plays("near own", "Massive Attack", "Massive Attack"),
+      ...plays("near banned", "Massive Attack"),
+    ];
+    assert.deepEqual(suggestArtistsToAllow(judged, isUnknown), []);
+  });
+
+  it("needs at least one play next to your own", () => {
+    assert.deepEqual(suggestArtistsToAllow(plays("unclear", "Massive Attack"), isUnknown), []);
+  });
+
+  it("puts the most plays next to your own first, then sorts by name", () => {
+    const judged = plays("near own", "UNKLE", "UNKLE", "Zero 7", "Zero 7", "Zero 7", "Archive", "Archive");
+    assert.deepEqual(
+      suggestArtistsToAllow(judged, isUnknown).map(({ name }) => name),
+      ["Zero 7", "Archive", "UNKLE"],
+    );
+  });
+});
+
+describe("suggestArtistsToDecide", () => {
+  it("suggests an unknown artist with mixed neighbours", () => {
+    const judged = [...plays("near banned", "Josh Gad"), ...plays("near own", "Josh Gad")];
+    assert.deepEqual(suggestArtistsToDecide(judged, isUnknown), [
+      { name: "Josh Gad", reason: "1 of 2 plays next to banned, 1 next to your own" },
+    ]);
+  });
+
+  it("suggests an unknown artist with no clear neighbours", () => {
+    assert.deepEqual(suggestArtistsToDecide(plays("unclear", "Josh Gad"), isUnknown), [
+      { name: "Josh Gad", reason: "0 of 1 play next to banned, 0 next to your own" },
+    ]);
+  });
+
+  it("leaves clear cases to the ban and allow suggestions", () => {
+    const judged = [...plays("near banned", "Josh Gad"), ...plays("near own", "Massive Attack")];
+    assert.deepEqual(suggestArtistsToDecide(judged, isUnknown), []);
+  });
+
+  it("puts the most plays next to banned first, then the most plays overall, then by name", () => {
+    const judged = [...plays("near banned", "A", "A", "B", "C"), ...plays("near own", "A", "A", "B", "C", "C")];
+    assert.deepEqual(
+      suggestArtistsToDecide(judged, isUnknown).map(({ name }) => name),
+      ["A", "C", "B"],
     );
   });
 });
@@ -147,137 +248,81 @@ describe("suggestAlbumsToBan", () => {
   const SHREK = "music/Various+Artists/Shrek";
   const CINDERELLA = "music/Various+Artists/Cinderella";
   const GIRL = "music/Pharrell+Williams/G+I+R+L";
-  const isAllowed = (artist: string) => artist === "Pharrell Williams";
+  const isAllowedHere = (artist: string) => artist === "Pharrell Williams";
   const notBanned = () => false;
 
-  it("suggests a compilation that only turns up in banned sessions", () => {
-    const sessions = [
-      albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK]),
-      albumSession(true, ["Smash Mouth", SHREK]),
-    ];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), [
-      { name: SHREK, reason: "compilation, all 3 plays in banned sessions" },
+  it("suggests a compilation whose every play is next to banned scrobbles", () => {
+    const judged = albumPlays("near banned", ["Smash Mouth", SHREK], ["Eels", SHREK], ["Smash Mouth", SHREK]);
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), [
+      { name: SHREK, reason: "compilation, all 3 plays next to banned scrobbles" },
     ]);
   });
 
-  it("suggests an album by an allow-listed artist that only turns up in banned sessions", () => {
-    const sessions = [
-      albumSession(true, ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL]),
-      albumSession(true, ["Pharrell Williams", GIRL]),
-    ];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), [
-      { name: GIRL, reason: "by Pharrell Williams, all 3 plays in banned sessions" },
+  it("suggests an album by an allow-listed artist whose every play is next to banned scrobbles", () => {
+    const judged = albumPlays(
+      "near banned",
+      ["Pharrell Williams", GIRL],
+      ["Pharrell Williams", GIRL],
+      ["Pharrell Williams", GIRL],
+    );
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), [
+      { name: GIRL, reason: "by Pharrell Williams, all 3 plays next to banned scrobbles" },
     ]);
   });
 
   it("leaves albums by other artists to the artist suggestions", () => {
     const frozen = "music/Josh+Gad/Frozen";
-    const sessions = [albumSession(true, ["Josh Gad", frozen], ["Josh Gad", frozen], ["Josh Gad", frozen])];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+    const judged = albumPlays("near banned", ["Josh Gad", frozen], ["Josh Gad", frozen], ["Josh Gad", frozen]);
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), []);
   });
 
-  it("needs every play to be in a banned session", () => {
-    const sessions = [
-      albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK]),
-      albumSession(false, ["Smash Mouth", SHREK]),
+  it("needs every play to be next to banned scrobbles", () => {
+    const judged = [
+      ...albumPlays("near banned", ["Smash Mouth", SHREK], ["Eels", SHREK]),
+      ...albumPlays("unclear", ["Smash Mouth", SHREK]),
     ];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), []);
   });
 
   it("needs at least 3 plays", () => {
-    const sessions = [albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK])];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+    const judged = albumPlays("near banned", ["Smash Mouth", SHREK], ["Eels", SHREK]);
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), []);
   });
 
   it("skips albums that are already banned", () => {
-    const sessions = [albumSession(true, ["Smash Mouth", SHREK], ["Eels", SHREK], ["Smash Mouth", SHREK])];
+    const judged = albumPlays("near banned", ["Smash Mouth", SHREK], ["Eels", SHREK], ["Smash Mouth", SHREK]);
     const isBannedAlbum = (album: string) => album === `https://www.last.fm/${SHREK}`;
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, isBannedAlbum), []);
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, isBannedAlbum), []);
   });
 
   it("skips links that are not albums", () => {
     const track = "music/Pharrell+Williams/_/Happy";
-    const sessions = [
-      albumSession(true, ["Pharrell Williams", track], ["Pharrell Williams", track], ["Pharrell Williams", track]),
-    ];
-    assert.deepEqual(suggestAlbumsToBan(sessions, isAllowed, notBanned), []);
+    const judged = albumPlays(
+      "near banned",
+      ["Pharrell Williams", track],
+      ["Pharrell Williams", track],
+      ["Pharrell Williams", track],
+    );
+    assert.deepEqual(suggestAlbumsToBan(judged, isAllowedHere, notBanned), []);
   });
 
   it("puts the most played albums first, then sorts by path", () => {
-    const sessions = [
-      albumSession(true, ["A", CINDERELLA], ["B", CINDERELLA], ["C", CINDERELLA]),
-      albumSession(true, ["A", SHREK], ["B", SHREK], ["C", SHREK], ["D", SHREK]),
-      albumSession(true, ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL], ["Pharrell Williams", GIRL]),
-    ];
+    const judged = albumPlays(
+      "near banned",
+      ["A", CINDERELLA],
+      ["B", CINDERELLA],
+      ["C", CINDERELLA],
+      ["A", SHREK],
+      ["B", SHREK],
+      ["C", SHREK],
+      ["D", SHREK],
+      ["Pharrell Williams", GIRL],
+      ["Pharrell Williams", GIRL],
+      ["Pharrell Williams", GIRL],
+    );
     assert.deepEqual(
-      suggestAlbumsToBan(sessions, isAllowed, notBanned).map(({ name }) => name),
+      suggestAlbumsToBan(judged, isAllowedHere, notBanned).map(({ name }) => name),
       [SHREK, GIRL, CINDERELLA],
-    );
-  });
-});
-
-describe("suggestArtistsToAllow", () => {
-  it("suggests an unknown artist with no plays in banned sessions", () => {
-    const sessions = [session(false, "Massive Attack", "Massive Attack"), session(false, "Massive Attack")];
-    assert.deepEqual(suggestArtistsToAllow(sessions, isUnknown), [
-      { name: "Massive Attack", reason: "3 plays, none in banned sessions" },
-    ]);
-  });
-
-  it("suggests an artist with a single play", () => {
-    const sessions = [session(false, "Massive Attack")];
-    assert.deepEqual(suggestArtistsToAllow(sessions, isUnknown), [
-      { name: "Massive Attack", reason: "1 play, none in banned sessions" },
-    ]);
-  });
-
-  it("rules out an artist with any play in a banned session", () => {
-    const sessions = [
-      session(false, "Massive Attack", "Massive Attack", "Massive Attack"),
-      session(true, "Peppa Pig", "Massive Attack"),
-    ];
-    assert.deepEqual(suggestArtistsToAllow(sessions, isUnknown), []);
-  });
-
-  it("skips artists that are not unknown", () => {
-    const sessions = [session(false, "Massive Attack", "Massive Attack", "Massive Attack")];
-    assert.deepEqual(
-      suggestArtistsToAllow(sessions, (artist) => artist !== "Massive Attack"),
-      [],
-    );
-  });
-
-  it("puts the most played first, then sorts by name", () => {
-    const sessions = [
-      session(false, "UNKLE", "UNKLE", "UNKLE"),
-      session(false, "Zero 7", "Zero 7", "Zero 7", "Zero 7"),
-      session(false, "Archive", "Archive", "Archive"),
-    ];
-    assert.deepEqual(
-      suggestArtistsToAllow(sessions, isUnknown).map(({ name }) => name),
-      ["Zero 7", "Archive", "UNKLE"],
-    );
-  });
-});
-
-describe("suggestArtistsToDecide", () => {
-  it("suggests an unknown artist with some, but no more than half, of its plays in banned sessions", () => {
-    const sessions = [session(true, "Peppa Pig", "Josh Gad"), session(false, "Josh Gad")];
-    assert.deepEqual(suggestArtistsToDecide(sessions, isUnknown), [
-      { name: "Josh Gad", reason: "1 of 2 plays in banned sessions" },
-    ]);
-  });
-
-  it("leaves clear cases to the ban and allow suggestions", () => {
-    const sessions = [session(true, "Peppa Pig", "Josh Gad"), session(false, "Massive Attack")];
-    assert.deepEqual(suggestArtistsToDecide(sessions, isUnknown), []);
-  });
-
-  it("puts the most plays in banned sessions first, then the most plays overall, then by name", () => {
-    const sessions = [session(true, "B", "C", "A"), session(true, "A"), session(false, "A", "A", "B", "C", "C")];
-    assert.deepEqual(
-      suggestArtistsToDecide(sessions, isUnknown).map(({ name }) => name),
-      ["A", "C", "B"],
     );
   });
 });
@@ -285,29 +330,73 @@ describe("suggestArtistsToDecide", () => {
 describe("every unknown artist", () => {
   it("is suggested exactly once, to ban, allow or decide", () => {
     const scrobbles = [
-      ["Peppa Pig", 0],
-      ["Josh Gad", 1],
-      ["Bluey", 2],
-      ["Gummy Kid", 3],
-      ["Massive Attack", 60],
-      ["Josh Gad", 61],
-      ["UNKLE", 62],
-      ["Peppa Pig", 120],
-      ["Mixed", 121],
-      ["Bluey", 122],
-      ["Mixed", 180],
-      ["Mixed", 181],
-      ["Archive", 182],
-    ].map(([artist, minute]) => scrobble(artist as string, minute as number));
-    const sessions = toSessions(scrobbles, 30, isUnwanted);
-    const unknown = findUnknownArtists(scrobbles, (artist) => bannedArtists.has(artist), isUnwanted);
+      ...inOrder("Peppa Pig", "Josh Gad", "Bluey", "Gummy Kid"),
+      scrobble("Portishead", 60),
+      scrobble("Josh Gad", 61),
+      scrobble("UNKLE", 62),
+      scrobble("Leftfield", 63),
+      scrobble("Peppa Pig", 120),
+      scrobble("Mixed", 121),
+      scrobble("Portishead", 122),
+      scrobble("Lonely", 300),
+    ];
+    const judged = judgePlays(toSessions(scrobbles, 30), isUnwanted, isAllowed);
+    const unknown = findUnknownArtists(scrobbles, (artist) => !isUnknown(artist), isUnwanted);
     const isUnknownHere = (artist: string) => unknown.has(artist);
     const suggested = [
-      ...suggestArtistsToBan(sessions, isUnknownHere),
-      ...suggestArtistsToAllow(sessions, isUnknownHere),
-      ...suggestArtistsToDecide(sessions, isUnknownHere),
+      ...suggestArtistsToBan(judged, isUnknownHere),
+      ...suggestArtistsToAllow(judged, isUnknownHere),
+      ...suggestArtistsToDecide(judged, isUnknownHere),
     ].map(({ name }) => name);
     assert.deepEqual(suggested.toSorted(), [...unknown].toSorted());
+  });
+});
+
+describe("the dry run of 21 Oct 2026", () => {
+  // The afternoon from acetonecm's library: their own music, a 22-minute gap, then the kids' music.
+  // Judged by whole sessions, the kids' block joined the afternoon's session, which was mostly theirs,
+  // so Ninja Sex Party and KATSEYE were wrongly suggested for the allow list.
+  const at = (artist: string, time: string): Scrobble => {
+    const [hour, minute] = time.split(":").map(Number);
+    return { ...scrobble(artist, 0), timestamp: new Date(2026, 9, 21, hour, minute) };
+  };
+  const banned = new Set(["Justin Bieber", "Pinkfong", "Danny Go!", "PAW Patrol", "Ed Sheeran"]);
+  const allowed = new Set(["Younger Brother", "Leftfield", "Portishead", "Chase & Status"]);
+  const scrobbles = [
+    ...["15:42", "15:49"].map((time) => at("Younger Brother", time)),
+    ...["15:54", "16:01", "16:09", "16:14", "16:21", "16:27", "16:31", "16:38", "16:45", "16:51", "16:57", "17:05"].map(
+      (time) => at("Leftfield", time),
+    ),
+    at("Portishead", "17:13"),
+    ...["17:21", "17:23", "17:27"].map((time) => at("Chase & Status", time)),
+    ...["17:31", "17:38", "17:43", "17:47", "17:53", "17:58", "18:02", "18:06", "18:12", "18:17", "18:23"].map((time) =>
+      at("Portishead", time),
+    ),
+    at("Justin Bieber", "18:45"),
+    at("Pinkfong", "18:47"),
+    at("Danny Go!", "18:49"),
+    ...["18:53", "18:54", "18:55"].map((time) => at("PAW Patrol", time)),
+    at("Ninja Sex Party", "18:57"),
+    at("KATSEYE", "18:58"),
+    at("Justin Bieber", "19:00"),
+    at("Justin Bieber", "20:06"),
+    at("Ed Sheeran", "21:08"),
+  ];
+  const isUnwantedHere = (s: Scrobble) => banned.has(s.artist);
+  const isUnknownHere = (artist: string) => !banned.has(artist) && !allowed.has(artist);
+  const judged = judgePlays(toSessions(scrobbles, 30), isUnwantedHere, (artist) => allowed.has(artist));
+
+  it("suggests banning Ninja Sex Party and KATSEYE", () => {
+    assert.deepEqual(
+      suggestArtistsToBan(judged, isUnknownHere)
+        .map(({ name }) => name)
+        .toSorted(),
+      ["KATSEYE", "Ninja Sex Party"],
+    );
+  });
+
+  it("suggests nothing for the allow list", () => {
+    assert.deepEqual(suggestArtistsToAllow(judged, isUnknownHere), []);
   });
 });
 
@@ -319,8 +408,8 @@ describe("formatSuggestions", () => {
         {
           title: "Artists to ban",
           suggestions: [
-            { name: "Josh Gad", reason: "3 of 4 plays in banned sessions" },
-            { name: "Gummy Kid", reason: "3 of 3 plays in banned sessions" },
+            { name: "Josh Gad", reason: "3 of 4 plays next to banned scrobbles" },
+            { name: "Gummy Kid", reason: "3 of 3 plays next to banned scrobbles" },
           ],
         },
         { title: "Albums to ban", suggestions: [] },
@@ -333,8 +422,8 @@ describe("formatSuggestions", () => {
         `# Suggestions from the dry run at ${generatedAt.toLocaleString()}`,
         "",
         "# Artists to ban",
-        "Josh Gad  # 3 of 4 plays in banned sessions",
-        "Gummy Kid  # 3 of 3 plays in banned sessions",
+        "Josh Gad  # 3 of 4 plays next to banned scrobbles",
+        "Gummy Kid  # 3 of 3 plays next to banned scrobbles",
         "",
         "# Albums to ban",
         "# (none)",
