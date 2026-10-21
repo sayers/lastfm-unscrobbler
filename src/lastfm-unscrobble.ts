@@ -7,11 +7,13 @@ import { ALLOWED_ARTISTS_FILE, BANNED_ALBUMS_FILE, BANNED_ARTISTS_FILE, loadAllo
 import { LAST_SEEN_FILE, type LastSeen, readLastSeen, writeLastSeen } from "./last-seen.ts";
 import { readLastPageNumber, readLibraryPage, type Scrobble } from "./library.ts";
 import {
+  findUnknownArtists,
   printSuggestions,
   SUGGESTIONS_FILE,
   suggestAlbumsToBan,
   suggestArtistsToAllow,
   suggestArtistsToBan,
+  suggestArtistsToDecide,
   toSessions,
   writeSuggestions,
 } from "./suggestions.ts";
@@ -233,14 +235,21 @@ for (let pageNumber = pageCount; pageNumber >= 1; pageNumber--) {
   }
 }
 
+// Every artist left after the deletions must be on the banned or allow list.
+const unknownArtists = findUnknownArtists(
+  scanned,
+  (artist) => bannedLookups.artists.has(artist) || allowedArtists.has(artist),
+  isUnwanted,
+);
+const isUnknown = (artist: string) => unknownArtists.has(artist);
+
 if (dryRun) {
   const sessions = toSessions(scanned, SESSION_GAP_MINUTES, isUnwanted);
   console.log(
     `Found ${sessions.length} listening sessions, ${sessions.filter(({ banned }) => banned).length} of them mostly unwanted.`,
   );
-  const isListed = (artist: string) => bannedLookups.artists.has(artist) || allowedArtists.has(artist);
   const sections = [
-    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isListed) },
+    { title: `Artists to ban (add to ${BANNED_ARTISTS_FILE})`, suggestions: suggestArtistsToBan(sessions, isUnknown) },
     {
       title: `Albums to ban (add to ${BANNED_ALBUMS_FILE})`,
       suggestions: suggestAlbumsToBan(
@@ -251,7 +260,11 @@ if (dryRun) {
     },
     {
       title: `Artists to allow (add to ${ALLOWED_ARTISTS_FILE})`,
-      suggestions: suggestArtistsToAllow(sessions, isListed),
+      suggestions: suggestArtistsToAllow(sessions, isUnknown),
+    },
+    {
+      title: `Artists to decide (add to ${BANNED_ARTISTS_FILE} or ${ALLOWED_ARTISTS_FILE})`,
+      suggestions: suggestArtistsToDecide(sessions, isUnknown),
     },
   ];
   printSuggestions(sections);
@@ -259,11 +272,21 @@ if (dryRun) {
   console.log(`Suggestions written to ${resolve(SUGGESTIONS_FILE)}`);
 }
 
-// Only a completed real run moves the starting point on; otherwise the next run covers the same ground again.
+if (unknownArtists.size > 0) {
+  const names = [...unknownArtists];
+  console.warn(
+    `Warning: ${names.length} artists are on neither the banned nor the allow list: ${names.slice(0, 10).join(", ")}${names.length > 10 ? ", ..." : ""}. Run a dry run for suggestions and add each one to a list.`,
+  );
+}
+
+// Only a completed real run with every artist decided moves the starting point on;
+// otherwise the next run covers the same ground again.
 if (dryRun) {
   console.log("Dry run, so the last-seen scrobble was not updated.");
 } else if (reachedMaxPages) {
   console.warn("The last-seen scrobble was not updated because the run stopped at MAX_PAGES.");
+} else if (unknownArtists.size > 0) {
+  console.warn("The last-seen scrobble was not updated because some artists are on neither list.");
 } else {
   const [newest] = await readLibraryPage(page, USERNAME, 1);
   if (newest) {

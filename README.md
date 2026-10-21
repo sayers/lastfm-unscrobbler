@@ -59,7 +59,9 @@ A run deletes the scrobbles that match a banned artist or album. A dry run only 
 2. While the oldest page read still has a scrobble to delete, read one more page.
 3. Stop at `MAX_PAGES`, with a warning that unwanted scrobbles may go back further.
 
-Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. If the run stopped at `MAX_PAGES`, the record is left unchanged so the next run covers the same ground again.
+Pages are worked from the oldest back to page 1, so deletions never shift pages that are still to be checked. When a real run finishes it records the newest remaining scrobble in `data/last-seen.json`, so the next run only has to look at what is new. The record is left unchanged, so the next run covers the same ground again, if the run stopped at `MAX_PAGES` or if any artist in the scanned pages is on neither list.
+
+Every artist must end up on the banned or allow list. An artist on neither list, whose scrobbles are not all being deleted anyway, is an unknown artist. Any run with unknown artists ends with a warning naming them, and real runs hold back `data/last-seen.json` until each one has been added to a list.
 
 A dry run never deletes anything and never updates `data/last-seen.json`.
 
@@ -68,11 +70,12 @@ A dry run groups the scanned scrobbles into listening sessions, split wherever t
 
 From those sessions it suggests:
 
-- **Artists to ban**: artists in neither list who appear at least 3 times, mostly in banned sessions.
+- **Artists to ban**: unknown artists with more than half of their plays in banned sessions.
 - **Albums to ban**: albums that cannot be banned by artist, played at least 3 times and only ever in banned sessions. These are Various Artists compilations and albums by artists on your allow list.
-- **Artists to allow**: artists in neither list who appear at least 3 times and never in a banned session.
+- **Artists to allow**: unknown artists with no plays in banned sessions.
+- **Artists to decide**: unknown artists with some plays in banned sessions, but no more than half.
 
-Each suggestion comes with its reason, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. To stop an artist being suggested, add them to `data/allow.list.txt`.
+Every unknown artist appears in exactly one of the three artist sections, even after a single play, so none can be missed. The play counts in each reason show how strong the guess is, e.g. `Josh Gad  # 4 of 5 plays in banned sessions`. A summary is printed at the end of the run and the full list is written to `data/suggestions.txt`. Copy the entries you agree with into the matching list, without the `# ...` reason. Album suggestions are already in the path form `data/banned.album.list.txt` uses. Once an artist is on either list, it is no longer suggested.
 
 ## Development
 ```bash

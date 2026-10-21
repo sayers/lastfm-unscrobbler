@@ -4,8 +4,9 @@ import type { Scrobble } from "./library.ts";
 
 export const SUGGESTIONS_FILE = "./data/suggestions.txt";
 
-// An artist or album needs at least this many plays in the scanned pages before it is worth suggesting.
-const MIN_PLAYS = 3;
+// An album needs at least this many plays in the scanned pages before it is worth suggesting.
+// Artists have no minimum: every unknown artist is suggested somewhere, so none can be missed.
+const MIN_ALBUM_PLAYS = 3;
 
 const LASTFM_URL = "https://www.last.fm/";
 // Album paths look like music/Artist/Album; a track path has an extra /_/ part.
@@ -53,22 +54,49 @@ const countArtistPlays = (sessions: Session[]) => {
   return [...plays];
 };
 
-// Artists on neither list who turn up mostly in banned sessions.
-export const suggestArtistsToBan = (sessions: Session[], isListed: (artist: string) => boolean): Suggestion[] =>
+const playCount = (count: number) => `${count} ${count === 1 ? "play" : "plays"}`;
+
+// Artists on neither list that would still have scrobbles left after the deletions.
+// An artist whose every scrobble is deleted, e.g. through a banned album, needs no decision.
+export const findUnknownArtists = (
+  scrobbles: Scrobble[],
+  isListed: (artist: string) => boolean,
+  isUnwanted: (scrobble: Scrobble) => boolean,
+) =>
+  new Set(
+    scrobbles.filter((scrobble) => !isUnwanted(scrobble) && !isListed(scrobble.artist)).map(({ artist }) => artist),
+  );
+
+// Every unknown artist lands in exactly one of the next three: to ban, to allow, or to decide.
+
+// Unknown artists who turn up mostly in banned sessions.
+export const suggestArtistsToBan = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
   countArtistPlays(sessions)
-    .filter(([artist, { total, inBanned }]) => !isListed(artist) && total >= MIN_PLAYS && inBanned * 2 > total)
+    .filter(([artist, { total, inBanned }]) => isUnknown(artist) && inBanned * 2 > total)
     .sort(([, a], [, b]) => b.inBanned - a.inBanned || a.total - b.total)
     .map(([artist, { total, inBanned }]) => ({
       name: artist,
-      reason: `${inBanned} of ${total} plays in banned sessions`,
+      reason: `${inBanned} of ${playCount(total)} in banned sessions`,
     }));
 
-// Artists on neither list who never turn up in a banned session, so are most likely yours.
-export const suggestArtistsToAllow = (sessions: Session[], isListed: (artist: string) => boolean): Suggestion[] =>
+// Unknown artists who never turn up in a banned session, so are most likely yours.
+export const suggestArtistsToAllow = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
   countArtistPlays(sessions)
-    .filter(([artist, { total, inBanned }]) => !isListed(artist) && total >= MIN_PLAYS && inBanned === 0)
+    .filter(([artist, { inBanned }]) => isUnknown(artist) && inBanned === 0)
     .sort(([artistA, a], [artistB, b]) => b.total - a.total || artistA.localeCompare(artistB))
-    .map(([artist, { total }]) => ({ name: artist, reason: `${total} plays, none in banned sessions` }));
+    .map(([artist, { total }]) => ({ name: artist, reason: `${playCount(total)}, none in banned sessions` }));
+
+// Unknown artists split between banned sessions and yours, so there is no clear guess.
+export const suggestArtistsToDecide = (sessions: Session[], isUnknown: (artist: string) => boolean): Suggestion[] =>
+  countArtistPlays(sessions)
+    .filter(([artist, { total, inBanned }]) => isUnknown(artist) && inBanned > 0 && inBanned * 2 <= total)
+    .sort(
+      ([artistA, a], [artistB, b]) => b.inBanned - a.inBanned || b.total - a.total || artistA.localeCompare(artistB),
+    )
+    .map(([artist, { total, inBanned }]) => ({
+      name: artist,
+      reason: `${inBanned} of ${playCount(total)} in banned sessions`,
+    }));
 
 // Albums that only turn up in banned sessions but can't be banned by artist:
 // compilations, whose tracks are by many artists, and albums by allow-listed artists.
@@ -95,7 +123,7 @@ export const suggestAlbumsToBan = (
     }
   }
   return [...plays]
-    .filter(([, { total, inBanned }]) => total >= MIN_PLAYS && inBanned === total)
+    .filter(([, { total, inBanned }]) => total >= MIN_ALBUM_PLAYS && inBanned === total)
     .sort(([pathA, a], [pathB, b]) => b.total - a.total || pathA.localeCompare(pathB))
     .map(([path, { total, by }]) => ({ name: path, reason: `${by}, all ${total} plays in banned sessions` }));
 };
